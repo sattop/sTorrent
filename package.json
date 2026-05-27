@@ -17,7 +17,7 @@
     "build:renderer": "vite build",
     "build:electron": "tsc -p electron/tsconfig.json && npm run build:preload",
     "build:preload": "esbuild electron/preload.ts --bundle --platform=node --target=node22 --format=cjs --external:electron --outfile=dist-electron/preload.cjs",
-    "build:windows": "npm run build:icons && npm run build && electron-builder --win nsis --x64",
+    "build:windows": "npm run build:icons && npm run build && electron-builder --win nsis --x64 --publish never",
     "lint:types": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
     "audit:security": "node scripts/audit-security.mjs",
     "test": "vitest"
