@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-electron/
+release/
+*.tsbuildinfo
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Logs and diagnostics
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# User torrent data
+downloads/
+Download/
+Torrents/
+*.torrent
+*.resume
+*.fastresume
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

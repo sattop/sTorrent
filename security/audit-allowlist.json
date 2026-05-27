@@ -1,0 +1,19 @@
+{
+  "acceptedRisks": [
+    {
+      "id": "GHSA-2p57-rm9w-gvfp",
+      "source": 1101851,
+      "title": "ip SSRF improper categorization in isPublic",
+      "severity": "high",
+      "decision": "accept_for_mvp",
+      "reviewBy": "2026-06-30",
+      "packages": [
+        "ip",
+        "bittorrent-tracker",
+        "torrent-discovery",
+        "webtorrent"
+      ],
+      "reason": "webtorrent@3.0.6 is the latest upstream release and still depends on bittorrent-tracker -> ip@2.0.1. The vulnerable package is pulled in by bittorrent-tracker's tracker server UDP parser; sTorent embeds WebTorrent as a client and does not expose a tracker server. Replacing the engine is larger than the stage-3 file/category/tag scope, so the MVP accepts this transitive risk explicitly until an upstream fix or engine migration is ready."
+    }
+  ]
+}

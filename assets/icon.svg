@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="sTorent icon">
+  <defs>
+    <linearGradient id="bg" x1="40" y1="28" x2="216" y2="228" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1264d8"/>
+      <stop offset="0.58" stop-color="#0f8fbd"/>
+      <stop offset="1" stop-color="#14b27a"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="70" y1="38" x2="190" y2="218" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="54" fill="url(#bg)"/>
+  <path d="M58 36h74c45 0 82 37 82 82v102H124c-45 0-82-37-82-82V52c0-9 7-16 16-16Z" fill="url(#shine)"/>
+  <path
+    d="M172 71c-25-18-73-14-89 12-14 23 4 46 41 53 32 6 45 17 35 35-12 21-55 23-86 2"
+    fill="none"
+    stroke="#fff"
+    stroke-width="28"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M179 157v33h-33"
+    fill="none"
+    stroke="#bff8ff"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

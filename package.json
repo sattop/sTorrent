@@ -1,0 +1,99 @@
+{
+  "name": "storent",
+  "version": "0.1.0",
+  "description": "A modern desktop BitTorrent client with Smart Download Assistant and Speed Doctor.",
+  "author": "sTorent contributors",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2026 sTorent contributors",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "npm run build:electron && concurrently -k \"npm:dev:renderer\" \"npm:dev:main\"",
+    "dev:renderer": "vite --host 127.0.0.1",
+    "dev:main": "wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
+    "build:icons": "node scripts/generate-icon.mjs",
+    "build": "npm run lint:types && npm run build:renderer && npm run build:electron",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p electron/tsconfig.json && npm run build:preload",
+    "build:preload": "esbuild electron/preload.ts --bundle --platform=node --target=node22 --format=cjs --external:electron --outfile=dist-electron/preload.cjs",
+    "build:windows": "npm run build:icons && npm run build && electron-builder --win nsis --x64",
+    "lint:types": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
+    "audit:security": "node scripts/audit-security.mjs",
+    "test": "vitest"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.0",
+    "@testing-library/react": "^16.2.0",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^42.2.0",
+    "electron-builder": "^26.0.0",
+    "esbuild": "^0.27.7",
+    "jsdom": "^26.0.0",
+    "rcedit": "^5.0.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.8.0",
+    "vite": "^7.0.0",
+    "vitest": "^3.1.0"
+  },
+  "build": {
+    "appId": "app.storent.desktop",
+    "productName": "sTorent",
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets",
+        "to": "assets",
+        "filter": [
+          "icon.ico"
+        ]
+      }
+    ],
+    "afterPack": "scripts/after-pack.mjs",
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "icon": "assets/icon.ico",
+      "executableName": "sTorent",
+      "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "sTorent Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "uninstallDisplayName": "sTorent",
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "shortcutName": "sTorent"
+    }
+  },
+  "dependencies": {
+    "webtorrent": "^3.0.6"
+  }
+}
