@@ -14,7 +14,7 @@ Latest release: [sTorent v0.1.1](https://github.com/sattop/sTorrent/releases/tag
 
 Download the Windows installer:
 
-[sTorent Setup.exe](https://github.com/sattop/sTorrent/releases/download/v0.1.1/sTorent%20Setup.exe)
+[sTorent Setup.exe](https://github.com/sattop/sTorrent/releases/download/v0.1.1/sTorent.Setup.exe)
 
 The release also includes `SHA256SUMS.txt` for checksum verification.
 
