@@ -1,6 +1,6 @@
 {
   "name": "storent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A modern desktop BitTorrent client with Smart Download Assistant and Speed Doctor.",
   "author": "sTorent contributors",
   "license": "MIT",
