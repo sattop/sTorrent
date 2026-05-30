@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   clearStoredRemotePassword,
   createRemoteTorrentApi,
@@ -8,7 +8,10 @@ import {
 import {
   DOWNLOAD_PROFILE_IDS,
   type DownloadProfileId,
-  createAssistantBaseline
+  type SmartAssistantRecommendation,
+  type SmartAssistantSuggestion,
+  createAssistantBaseline,
+  createSmartAssistantRecommendation
 } from "./features/assistant";
 import { createSpeedDoctorBaseline } from "./features/speedDoctor";
 import { SUPPORTED_LOCALES, type Locale, createTranslator } from "./i18n";
@@ -28,10 +31,12 @@ import type {
   RssAutoLoadRuleSettings,
   SeedingRuleSettings,
   SpeedLimitScheduleSettings,
+  SpeedDoctorActionId,
   TorrentCoreEvent,
   TorrentCoreResult,
   TorrentCoreSnapshot,
   TorrentFilePriority,
+  TorrentSpeedDoctorReport,
   TorrentSummary,
   WatchFolderSettings
 } from "../electron/torrentCore/contracts";
@@ -60,12 +65,17 @@ const navItems = [
 
 type NavItem = (typeof navItems)[number];
 
+const LAST_DOWNLOAD_PROFILE_KEY = "storent.downloadProfile.last";
+const AUTO_SPEED_DOCTOR_ACTIVE_MS = 3 * 60 * 1000;
+const AUTO_SPEED_DOCTOR_THROTTLE_MS = 30 * 60 * 1000;
+const AUTO_SPEED_DOCTOR_LOW_SPEED_BYTES = 64 * 1024;
+
 export function App() {
   const [locale, setLocale] = useState<Locale>("ru");
   const [activeNav, setActiveNav] = useState<NavItem>("downloads");
   const [magnetUri, setMagnetUri] = useState("");
   const [selectedProfileId, setSelectedProfileId] =
-    useState<DownloadProfileId>("manual");
+    useState<DownloadProfileId>(() => readStoredDownloadProfile());
   const [categoryDraft, setCategoryDraft] = useState("");
   const [tagsDraft, setTagsDraft] = useState("");
   const [snapshot, setSnapshot] = useState<TorrentCoreSnapshot>({
@@ -84,7 +94,24 @@ export function App() {
   const [selectedFavoriteFolderId, setSelectedFavoriteFolderId] = useState("");
   const [diagnostics, setDiagnostics] =
     useState<NetworkDiagnosticsReport | null>(null);
+  const [speedDoctorReports, setSpeedDoctorReports] = useState<
+    Record<string, TorrentSpeedDoctorReport>
+  >({});
+  const [metadataAssistantTorrentId, setMetadataAssistantTorrentId] =
+    useState<string | null>(null);
+  const [speedDoctorHint, setSpeedDoctorHint] = useState<{
+    torrentId: string;
+    generatedAt: string;
+  } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    torrentId: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const autoSpeedDoctorActiveSince = useRef<Map<string, number>>(new Map());
+  const autoSpeedDoctorLastHintAt = useRef<Map<string, number>>(new Map());
+  const autoSpeedDoctorRunning = useRef<Set<string>>(new Set());
   const isRemoteWeb = !window.storent?.torrent;
   const [remotePassword, setRemotePassword] = useState(() =>
     isRemoteWeb ? getStoredRemotePassword() : ""
@@ -114,6 +141,110 @@ export function App() {
     (total, torrent) => total + torrent.uploadSpeedBytes,
     0
   );
+  const activeDownloadCount = snapshot.torrents.filter(
+    (torrent) => torrent.status === "downloading"
+  ).length;
+  const existingFileNames = useMemo(
+    () =>
+      snapshot.torrents.flatMap((torrent) =>
+        torrent.files.map((file) => file.path || file.name)
+      ),
+    [snapshot.torrents]
+  );
+  const metadataAssistantTorrent =
+    snapshot.torrents.find((torrent) => torrent.id === metadataAssistantTorrentId) ??
+    null;
+  const topSpeedDoctorTorrent = findSpeedDoctorCandidate(snapshot.torrents);
+  const favoriteFolderTemplates = automationDraft?.favoriteFolders ?? [];
+  const assistantRecommendation = useMemo(
+    () =>
+      createSmartAssistantRecommendation({
+        selectedProfileId:
+          selectedProfileId === "manual" ? undefined : selectedProfileId,
+        lastSelectedProfileId: selectedProfileId,
+        category: categoryDraft,
+        tags: parseTags(tagsDraft),
+        favoriteFolderSelected: Boolean(selectedFavoriteFolderId),
+        favoriteFolders: favoriteFolderTemplates,
+        activeDownloadCount,
+        networkProfileId:
+          networkState?.activeSettings.profileId ?? networkDraft?.profileId,
+        privateMode:
+          networkState?.activeSettings.privateMode ?? networkDraft?.privateMode,
+        activeSpeedSchedule: Boolean(automationState?.activeSpeedScheduleId),
+        existingFileNames
+      }),
+    [
+      activeDownloadCount,
+      automationState?.activeSpeedScheduleId,
+      categoryDraft,
+      existingFileNames,
+      favoriteFolderTemplates,
+      networkDraft?.privateMode,
+      networkDraft?.profileId,
+      networkState?.activeSettings.privateMode,
+      networkState?.activeSettings.profileId,
+      selectedFavoriteFolderId,
+      selectedProfileId,
+      tagsDraft
+    ]
+  );
+  const metadataAssistantRecommendation = useMemo(
+    () =>
+      metadataAssistantTorrent
+        ? createSmartAssistantRecommendation(
+            createTorrentAssistantInput({
+              torrent: metadataAssistantTorrent,
+              selectedProfileId:
+                metadataAssistantTorrent.selectedProfileId === "manual"
+                  ? undefined
+                  : metadataAssistantTorrent.selectedProfileId,
+              activeDownloadCount,
+              favoriteFolders: favoriteFolderTemplates,
+              existingFileNames,
+              networkProfileId:
+                networkState?.activeSettings.profileId ?? networkDraft?.profileId,
+              privateMode:
+                networkState?.activeSettings.privateMode ??
+                networkDraft?.privateMode,
+              activeSpeedSchedule: Boolean(automationState?.activeSpeedScheduleId),
+              disk:
+                speedDoctorReports[metadataAssistantTorrent.id]?.technicalDetails
+                  .disk ?? null
+            })
+          )
+        : null,
+    [
+      activeDownloadCount,
+      automationState?.activeSpeedScheduleId,
+      existingFileNames,
+      favoriteFolderTemplates,
+      metadataAssistantTorrent,
+      networkDraft?.privateMode,
+      networkDraft?.profileId,
+      networkState?.activeSettings.privateMode,
+      networkState?.activeSettings.profileId,
+      speedDoctorReports
+    ]
+  );
+
+  useEffect(() => {
+    storeDownloadProfile(selectedProfileId);
+  }, [selectedProfileId]);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return;
+    }
+
+    const close = () => setContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", close);
+    };
+  }, [contextMenu]);
 
   useEffect(() => {
     const api = torrentApi;
@@ -170,6 +301,15 @@ export function App() {
         setStatusMessage(t("error.operationFailed"));
       }
 
+      if (
+        event.type === "torrent.metadata.received" &&
+        event.payload.sourceType === "magnet"
+      ) {
+        setMetadataAssistantTorrentId(event.payload.id);
+        setActiveNav("downloads");
+        void runTorrentSpeedDoctor(event.payload.id, { silent: true });
+      }
+
       if (event.type === "settings.changed") {
         setNetworkState(event.payload.network);
         setNetworkDraft(event.payload.network.settings);
@@ -177,6 +317,13 @@ export function App() {
 
       if (event.type === "diagnostics.speed.checked") {
         setDiagnostics(event.payload.report);
+      }
+
+      if (event.type === "diagnostics.torrent_speed.checked") {
+        setSpeedDoctorReports((current) => ({
+          ...current,
+          [event.payload.report.torrentId]: event.payload.report
+        }));
       }
 
       if (event.type === "automation.settings.changed") {
@@ -211,6 +358,62 @@ export function App() {
       unsubscribe();
     };
   }, [isRemoteWeb, remotePassword, t, torrentApi]);
+
+  useEffect(() => {
+    const now = Date.now();
+    const activeIds = new Set(snapshot.torrents.map((torrent) => torrent.id));
+
+    for (const id of autoSpeedDoctorActiveSince.current.keys()) {
+      if (!activeIds.has(id)) {
+        autoSpeedDoctorActiveSince.current.delete(id);
+        autoSpeedDoctorLastHintAt.current.delete(id);
+        autoSpeedDoctorRunning.current.delete(id);
+      }
+    }
+
+    for (const torrent of snapshot.torrents) {
+      if (torrent.status !== "downloading" || !torrent.metadataReady) {
+        autoSpeedDoctorActiveSince.current.delete(torrent.id);
+        continue;
+      }
+
+      const activeSince =
+        autoSpeedDoctorActiveSince.current.get(torrent.id) ?? now;
+      autoSpeedDoctorActiveSince.current.set(torrent.id, activeSince);
+
+      const hasExplicitLimit =
+        networkState?.activeSettings.speedLimits.downloadBytesPerSecond !== null;
+      const lowSpeed =
+        torrent.downloadSpeedBytes < AUTO_SPEED_DOCTOR_LOW_SPEED_BYTES ||
+        torrent.peers === 0;
+      const lastHintAt = autoSpeedDoctorLastHintAt.current.get(torrent.id) ?? 0;
+
+      if (
+        hasExplicitLimit ||
+        !lowSpeed ||
+        now - activeSince < AUTO_SPEED_DOCTOR_ACTIVE_MS ||
+        now - lastHintAt < AUTO_SPEED_DOCTOR_THROTTLE_MS ||
+        autoSpeedDoctorRunning.current.has(torrent.id)
+      ) {
+        continue;
+      }
+
+      autoSpeedDoctorLastHintAt.current.set(torrent.id, now);
+      autoSpeedDoctorRunning.current.add(torrent.id);
+      void runTorrentSpeedDoctor(torrent.id, { silent: true, automatic: true })
+        .then((report) => {
+          if (report && report.status !== "ok") {
+            setSpeedDoctorHint({
+              torrentId: report.torrentId,
+              generatedAt: report.generatedAt
+            });
+          }
+        })
+        .finally(() => {
+          autoSpeedDoctorRunning.current.delete(torrent.id);
+        });
+    }
+  }, [networkState?.activeSettings.speedLimits.downloadBytesPerSecond, snapshot.torrents]);
 
   useEffect(() => {
     const api = window.storent?.remoteAccess;
@@ -379,6 +582,16 @@ export function App() {
     );
   }
 
+  async function updateTorrentProfile(id: string, profileId: DownloadProfileId) {
+    handleTorrentResult(
+      await torrentApi.updateProfile({
+        id,
+        profileId
+      }),
+      t("message.torrentProfileUpdated")
+    );
+  }
+
   async function setTorrentFilePriority(
     id: string,
     fileIndex: number,
@@ -433,6 +646,244 @@ export function App() {
     }
 
     handleResultError(result);
+  }
+
+  async function runTorrentSpeedDoctor(
+    id: string,
+    options: { silent?: boolean; automatic?: boolean } = {}
+  ) {
+    const result = await torrentApi.runSpeedDoctor(id);
+
+    if (!result) {
+      if (!options.silent) {
+        setStatusMessage(t("core.unavailable"));
+      }
+      return null;
+    }
+
+    if (result.ok) {
+      setSpeedDoctorReports((current) => ({
+        ...current,
+        [result.value.torrentId]: result.value
+      }));
+      if (!options.silent) {
+        setStatusMessage(t("message.speedDoctorDone"));
+      }
+      return result.value;
+    }
+
+    if (!options.silent) {
+      handleResultError(result);
+    }
+    return null;
+  }
+
+  async function applyNetworkSettingsPatch(patch: Partial<NetworkSettings>) {
+    const currentSettings = networkDraft ?? networkState?.settings;
+
+    if (!currentSettings) {
+      setStatusMessage(t("networkSettings.loading"));
+      return;
+    }
+
+    const result = await torrentApi.updateNetworkSettings({
+      ...currentSettings,
+      ...patch
+    });
+
+    if (!result) {
+      setStatusMessage(t("core.unavailable"));
+      return;
+    }
+
+    if (result.ok) {
+      setNetworkState(result.value);
+      setNetworkDraft(result.value.settings);
+      setStatusMessage(t("message.networkSettingsSaved"));
+      return;
+    }
+
+    handleResultError(result);
+  }
+
+  async function copySpeedDoctorReport(report: TorrentSpeedDoctorReport) {
+    if (!navigator.clipboard) {
+      setStatusMessage(t("error.operationFailed"));
+      return;
+    }
+
+    await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
+    setStatusMessage(t("message.speedDoctorReportCopied"));
+  }
+
+  async function handleSpeedDoctorAction(
+    torrent: TorrentSummary,
+    report: TorrentSpeedDoctorReport,
+    actionId: SpeedDoctorActionId
+  ) {
+    if (actionId === "copy_report") {
+      await copySpeedDoctorReport(report);
+      return;
+    }
+
+    if (actionId === "show_trackers") {
+      setActiveNav("trackers");
+      return;
+    }
+
+    if (actionId === "check_port") {
+      await runNetworkDiagnostics();
+      return;
+    }
+
+    if (actionId === "choose_network_interface" || actionId === "check_proxy") {
+      setActiveNav("settings");
+      return;
+    }
+
+    if (actionId === "open_folder") {
+      setActiveNav("files");
+      return;
+    }
+
+    if (actionId === "move_up_queue") {
+      setActiveNav("queue");
+      return;
+    }
+
+    const confirmed = window.confirm(t("speedDoctor.confirmMutation"));
+
+    if (!confirmed) {
+      return;
+    }
+
+    if (actionId === "resume_torrent") {
+      await resumeTorrent(torrent.id);
+      return;
+    }
+
+    if (actionId === "switch_download_profile") {
+      await updateTorrentProfile(torrent.id, "max_speed");
+      setSelectedProfileId("max_speed");
+      return;
+    }
+
+    if (actionId === "remove_temporary_limit") {
+      const currentLimits =
+        (networkDraft ?? networkState?.settings)?.speedLimits ?? null;
+
+      if (!currentLimits) {
+        setStatusMessage(t("networkSettings.loading"));
+        return;
+      }
+
+      await applyNetworkSettingsPatch({
+        speedLimits: {
+          ...currentLimits,
+          downloadBytesPerSecond: null
+        }
+      });
+      return;
+    }
+
+    if (actionId === "enable_upnp_nat_pmp") {
+      await applyNetworkSettingsPatch({
+        upnp: true,
+        natPmp: true
+      });
+      return;
+    }
+
+    if (actionId === "toggle_dht_for_public_torrent") {
+      await applyNetworkSettingsPatch({
+        dht: true
+      });
+      return;
+    }
+
+    if (actionId === "recheck_data") {
+      await recheckTorrent(torrent.id);
+      return;
+    }
+
+    if (actionId === "raise_file_priority") {
+      const skippedFile = torrent.files.find((file) => file.priority === "skip");
+
+      if (skippedFile) {
+        await setTorrentFilePriority(torrent.id, skippedFile.index, "high");
+      }
+    }
+  }
+
+  function applyAddAssistantSuggestion(suggestion: SmartAssistantSuggestion) {
+    if (suggestion.type === "folder") {
+      setSelectedFavoriteFolderId(suggestion.value);
+      return;
+    }
+
+    if (suggestion.type === "category") {
+      setCategoryDraft(suggestion.value);
+      return;
+    }
+
+    if (suggestion.type === "tags") {
+      setTagsDraft(
+        mergeTags(parseTags(tagsDraft), suggestion.values ?? [suggestion.value]).join(
+          ", "
+        )
+      );
+      return;
+    }
+
+    if (suggestion.type === "profile_template") {
+      setSelectedProfileId(suggestion.value as DownloadProfileId);
+    }
+  }
+
+  async function applyMetadataAssistantRecommendation(
+    torrent: TorrentSummary,
+    recommendation: SmartAssistantRecommendation
+  ) {
+    const confirmed = window.confirm(t("assistant.applyExistingConfirm"));
+
+    if (!confirmed) {
+      return;
+    }
+
+    await updateTorrentProfile(torrent.id, recommendation.profileId);
+
+    const categorySuggestion = recommendation.suggestions.find(
+      (suggestion) => suggestion.type === "category"
+    );
+    const tagSuggestion = recommendation.suggestions.find(
+      (suggestion) => suggestion.type === "tags"
+    );
+
+    if (categorySuggestion || tagSuggestion) {
+      await updateTorrentLabels(
+        torrent.id,
+        torrent.category ?? categorySuggestion?.value ?? "",
+        mergeTags(torrent.tags, tagSuggestion?.values ?? []).join(", ")
+      );
+    }
+
+    const prioritySuggestion = recommendation.suggestions.find(
+      (suggestion) => suggestion.type === "file_priority" && suggestion.filePath
+    );
+
+    if (prioritySuggestion?.filePath) {
+      const file = torrent.files.find(
+        (candidate) =>
+          candidate.path === prioritySuggestion.filePath ||
+          candidate.name === prioritySuggestion.filePath
+      );
+
+      if (file) {
+        await setTorrentFilePriority(torrent.id, file.index, "high");
+      }
+    }
+
+    setMetadataAssistantTorrentId(null);
   }
 
   async function saveRemoteAccessSettings() {
@@ -629,7 +1080,44 @@ export function App() {
                 : t("network.idle")}
             </strong>
           </article>
+          <article className="metric-card diagnostic-metric">
+            <span>{t("metric.speedDoctor")}</span>
+            <button
+              type="button"
+              className="secondary small-button"
+              disabled={!topSpeedDoctorTorrent}
+              onClick={() =>
+                topSpeedDoctorTorrent
+                  ? runTorrentSpeedDoctor(topSpeedDoctorTorrent.id)
+                  : undefined
+              }
+            >
+              {t("action.whySlow")}
+            </button>
+          </article>
         </section>
+
+        {speedDoctorHint ? (
+          <AutoSpeedDoctorBanner
+            hint={speedDoctorHint}
+            torrent={snapshot.torrents.find(
+              (torrent) => torrent.id === speedDoctorHint.torrentId
+            )}
+            report={speedDoctorReports[speedDoctorHint.torrentId]}
+            t={t}
+            onOpen={() => {
+              setActiveNav("downloads");
+              setMetadataAssistantTorrentId(speedDoctorHint.torrentId);
+            }}
+            onDismiss={() => setSpeedDoctorHint(null)}
+          />
+        ) : null}
+
+        {statusMessage ? (
+          <p className="status-message global-status" role="status">
+            {statusMessage}
+          </p>
+        ) : null}
 
         <section className="content-layout">
           <section className="downloads-panel">
@@ -676,6 +1164,16 @@ export function App() {
                 </label>
               ) : null}
 
+              <SmartAssistantCard
+                recommendation={assistantRecommendation}
+                selectedProfileId={selectedProfileId}
+                t={t}
+                onAccept={() =>
+                  setSelectedProfileId(assistantRecommendation.profileId)
+                }
+                onApplySuggestion={applyAddAssistantSuggestion}
+              />
+
               <div className="label-fields">
                 <label>
                   <span>{t("add.categoryLabel")}</span>
@@ -715,10 +1213,22 @@ export function App() {
                 </button>
               </form>
 
-              {statusMessage ? (
-                <p className="status-message">{statusMessage}</p>
-              ) : null}
             </article>
+
+            {metadataAssistantTorrent && metadataAssistantRecommendation ? (
+              <MetadataAssistantReview
+                torrent={metadataAssistantTorrent}
+                recommendation={metadataAssistantRecommendation}
+                t={t}
+                onApply={() =>
+                  applyMetadataAssistantRecommendation(
+                    metadataAssistantTorrent,
+                    metadataAssistantRecommendation
+                  )
+                }
+                onDismiss={() => setMetadataAssistantTorrentId(null)}
+              />
+            ) : null}
 
             {snapshot.torrents.length === 0 ? (
               <article className="empty-state">
@@ -728,7 +1238,18 @@ export function App() {
             ) : (
               <div className="torrent-list" aria-label={t("downloads.listLabel")}>
                 {snapshot.torrents.map((torrent) => (
-                  <article className="torrent-row" key={torrent.id}>
+                  <article
+                    className="torrent-row"
+                    key={torrent.id}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setContextMenu({
+                        torrentId: torrent.id,
+                        x: event.clientX,
+                        y: event.clientY
+                      });
+                    }}
+                  >
                     <div className="torrent-main">
                       <div>
                         <h2>{torrent.name}</h2>
@@ -737,6 +1258,10 @@ export function App() {
                           {formatBytes(torrent.downloadedBytes)} /{" "}
                           {formatBytes(torrent.sizeBytes)}
                         </p>
+                        <TorrentHealthBadge
+                          report={speedDoctorReports[torrent.id]}
+                          t={t}
+                        />
                       </div>
                       <strong>{formatPercent(torrent.progress, locale)}</strong>
                     </div>
@@ -790,6 +1315,13 @@ export function App() {
                       <button
                         type="button"
                         className="secondary"
+                        onClick={() => runTorrentSpeedDoctor(torrent.id)}
+                      >
+                        {t("action.whySlow")}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
                         onClick={() => recheckTorrent(torrent.id)}
                         disabled={!torrent.recheckAvailable}
                       >
@@ -803,6 +1335,20 @@ export function App() {
                         {t("action.removeFromList")}
                       </button>
                     </div>
+                    {speedDoctorReports[torrent.id] ? (
+                      <SpeedDoctorReportCard
+                        report={speedDoctorReports[torrent.id]}
+                        locale={locale}
+                        t={t}
+                        onAction={(actionId) =>
+                          handleSpeedDoctorAction(
+                            torrent,
+                            speedDoctorReports[torrent.id],
+                            actionId
+                          )
+                        }
+                      />
+                    ) : null}
                   </article>
                 ))}
               </div>
@@ -852,10 +1398,14 @@ export function App() {
                   networkDraft={networkDraft}
                   networkState={networkState}
                   diagnostics={diagnostics}
+                  snapshot={snapshot}
+                  speedDoctorReports={speedDoctorReports}
                   t={t}
                   onChange={setNetworkDraft}
                   onSave={saveNetworkSettings}
                   onRunDiagnostics={runNetworkDiagnostics}
+                  onRunSpeedDoctor={runTorrentSpeedDoctor}
+                  onSpeedDoctorAction={handleSpeedDoctorAction}
                 />
                 {window.storent?.remoteAccess ? (
                   <RemoteAccessPanel
@@ -882,31 +1432,48 @@ export function App() {
               <h2>{t("speedDoctor.title")}</h2>
               <p>{t(`speedDoctor.status.${speedDoctor.status}`)}</p>
             </div>
-            {activeNav === "settings" ? null : (
-              <NetworkSettingsPanel
-                locale={locale}
-                networkDraft={networkDraft}
-                networkState={networkState}
-                diagnostics={diagnostics}
-                t={t}
-                onChange={setNetworkDraft}
-                onSave={saveNetworkSettings}
-                onRunDiagnostics={runNetworkDiagnostics}
-              />
-            )}
-            {activeNav === "automation" ? null : (
-              <AutomationPanel
-                locale={locale}
-                automationDraft={automationDraft}
-                automationState={automationState}
-                t={t}
-                onChange={setAutomationDraft}
-                onSave={saveAutomationSettings}
-                onScanWatchFolders={runWatchFolderScan}
-              />
-            )}
+            <TorrentSpeedDiagnosticsPanel
+              snapshot={snapshot}
+              reports={speedDoctorReports}
+              locale={locale}
+              t={t}
+              onRunSpeedDoctor={runTorrentSpeedDoctor}
+              onAction={handleSpeedDoctorAction}
+            />
+            {automationDraft ? (
+              <div>
+                <h2>{t("automation.title")}</h2>
+                <p>
+                  {t("automation.watch.title")}:{" "}
+                  {automationDraft.watchFolders.filter((folder) => folder.enabled)
+                    .length}
+                </p>
+                <p>
+                  {t("automation.favorite.title")}:{" "}
+                  {automationDraft.favoriteFolders.length}
+                </p>
+              </div>
+            ) : null}
           </aside>
         </section>
+
+        {contextMenu ? (
+          <TorrentContextMenu
+            contextMenu={contextMenu}
+            torrent={snapshot.torrents.find(
+              (torrent) => torrent.id === contextMenu.torrentId
+            )}
+            t={t}
+            onClose={() => setContextMenu(null)}
+            onRunSpeedDoctor={(torrent) => {
+              void runTorrentSpeedDoctor(torrent.id);
+            }}
+            onPause={pauseTorrent}
+            onResume={resumeTorrent}
+            onRecheck={recheckTorrent}
+            onRemove={removeTorrent}
+          />
+        ) : null}
       </section>
     </main>
   );
@@ -1007,6 +1574,9 @@ function TrackersPanel({
                 <span>
                   {t("trackers.source")} ·{" "}
                   {t(`trackers.source.${torrent.sourceType}`)}
+                  {torrent.trackerHosts.length > 0
+                    ? ` · ${torrent.trackerHosts.join(", ")}`
+                    : ""}
                 </span>
               </div>
               <span>
@@ -1067,24 +1637,344 @@ function StatsPanel({
   );
 }
 
+function SmartAssistantCard({
+  recommendation,
+  selectedProfileId,
+  t,
+  onAccept,
+  onApplySuggestion
+}: {
+  recommendation: SmartAssistantRecommendation;
+  selectedProfileId: DownloadProfileId;
+  t: (key: string) => string;
+  onAccept: () => void;
+  onApplySuggestion?: (suggestion: SmartAssistantSuggestion) => void;
+}) {
+  const accepted = selectedProfileId === recommendation.profileId;
+  const visibleSuggestions = recommendation.suggestions.slice(0, 5);
+
+  return (
+    <section className="smart-assistant-card">
+      <div className="section-heading">
+        <h3>{t("assistant.recommendation.title")}</h3>
+        <span>{Math.round(recommendation.confidence * 100)}%</span>
+      </div>
+      <div className="recommendation-main">
+        <strong>{t(`profile.${recommendation.profileId}`)}</strong>
+        <button
+          type="button"
+          className="secondary small-button"
+          disabled={accepted}
+          onClick={onAccept}
+        >
+          {accepted
+            ? t("assistant.recommendation.applied")
+            : t("assistant.recommendation.accept")}
+        </button>
+      </div>
+      <ul className="reason-list">
+        {recommendation.reasons.slice(0, 4).map((reason) => (
+          <li key={reason}>{t(`assistant.reason.${reason}`)}</li>
+        ))}
+      </ul>
+      {recommendation.warnings.length > 0 ? (
+        <ul className="warning-list">
+          {recommendation.warnings.map((warning) => (
+            <li key={warning}>{t(`assistant.warning.${warning}`)}</li>
+          ))}
+        </ul>
+      ) : null}
+      {visibleSuggestions.length > 0 ? (
+        <div className="assistant-suggestions">
+          {visibleSuggestions.map((suggestion) => (
+            onApplySuggestion ? (
+              <button
+                type="button"
+                className="secondary small-button"
+                key={`${suggestion.type}-${suggestion.value}-${suggestion.filePath ?? ""}`}
+                onClick={() => onApplySuggestion(suggestion)}
+              >
+                {formatAssistantSuggestion(suggestion, t)}
+              </button>
+            ) : (
+              <span
+                className="assistant-suggestion-pill"
+                key={`${suggestion.type}-${suggestion.value}-${suggestion.filePath ?? ""}`}
+              >
+                {formatAssistantSuggestion(suggestion, t)}
+              </span>
+            )
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function MetadataAssistantReview({
+  torrent,
+  recommendation,
+  t,
+  onApply,
+  onDismiss
+}: {
+  torrent: TorrentSummary;
+  recommendation: SmartAssistantRecommendation;
+  t: (key: string) => string;
+  onApply: () => void | Promise<void>;
+  onDismiss: () => void;
+}) {
+  return (
+    <article className="metadata-assistant-panel">
+      <div className="section-heading">
+        <div>
+          <h2>{t("assistant.metadata.title")}</h2>
+          <p>{torrent.name}</p>
+        </div>
+        <button type="button" className="secondary small-button" onClick={onDismiss}>
+          {t("action.dismiss")}
+        </button>
+      </div>
+      <SmartAssistantCard
+        recommendation={recommendation}
+        selectedProfileId={torrent.selectedProfileId}
+        t={t}
+        onAccept={() => void onApply()}
+      />
+      <div className="row-actions">
+        <button type="button" onClick={() => void onApply()}>
+          {t("assistant.applyExisting")}
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function AutoSpeedDoctorBanner({
+  hint,
+  torrent,
+  report,
+  t,
+  onOpen,
+  onDismiss
+}: {
+  hint: { torrentId: string; generatedAt: string };
+  torrent: TorrentSummary | undefined;
+  report: TorrentSpeedDoctorReport | undefined;
+  t: (key: string) => string;
+  onOpen: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <section className="speed-doctor-hint">
+      <div>
+        <strong>{t("speedDoctor.autoHint.title")}</strong>
+        <p>
+          {torrent?.name ?? hint.torrentId}
+          {report?.primaryReason ? ` · ${t(`speedDoctor.reason.${report.primaryReason}`)}` : ""}
+        </p>
+      </div>
+      <div className="row-actions">
+        <button type="button" className="secondary small-button" onClick={onOpen}>
+          {t("speedDoctor.autoHint.open")}
+        </button>
+        <button type="button" className="secondary small-button" onClick={onDismiss}>
+          {t("action.dismiss")}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function TorrentHealthBadge({
+  report,
+  t
+}: {
+  report: TorrentSpeedDoctorReport | undefined;
+  t: (key: string) => string;
+}) {
+  const status = report?.status ?? "not_checked";
+
+  return (
+    <span className={`health-badge ${status}`}>
+      {t(`speedDoctor.reportStatus.${status}`)}
+    </span>
+  );
+}
+
+function SpeedDoctorReportCard({
+  report,
+  locale,
+  t,
+  onAction
+}: {
+  report: TorrentSpeedDoctorReport;
+  locale: Locale;
+  t: (key: string) => string;
+  onAction: (actionId: SpeedDoctorActionId) => void | Promise<void>;
+}) {
+  const visibleReasons = report.reasons.slice(0, 4);
+
+  return (
+    <section className={`speed-doctor-card ${report.status}`}>
+      <div className="section-heading">
+        <h3>{t("speedDoctor.reportTitle")}</h3>
+        <span>{t(`speedDoctor.reportStatus.${report.status}`)}</span>
+      </div>
+      <p>
+        {report.primaryReason
+          ? t(`speedDoctor.reason.${report.primaryReason}`)
+          : t("speedDoctor.noProblems")}
+      </p>
+      {visibleReasons.length > 0 ? (
+        <ol className="doctor-reasons">
+          {visibleReasons.map((reason) => (
+            <li key={reason.code}>
+              <strong>{t(`speedDoctor.reason.${reason.code}`)}</strong>
+              {reason.evidence === undefined ? null : (
+                <span>
+                  {formatSpeedDoctorEvidence(reason.evidence, reason.code, locale)}
+                </span>
+              )}
+            </li>
+          ))}
+        </ol>
+      ) : null}
+      <div className="doctor-actions">
+        {report.actions.slice(0, 5).map((actionId) => (
+          <button
+            type="button"
+            className="secondary small-button"
+            key={actionId}
+            onClick={() => void onAction(actionId)}
+          >
+            {t(`speedDoctor.action.${actionId}`)}
+          </button>
+        ))}
+      </div>
+      <details className="doctor-details">
+        <summary>{t("speedDoctor.details")}</summary>
+        <pre>{formatSpeedDoctorTechnicalReport(report)}</pre>
+      </details>
+    </section>
+  );
+}
+
+function TorrentContextMenu({
+  contextMenu,
+  torrent,
+  t,
+  onClose,
+  onRunSpeedDoctor,
+  onPause,
+  onResume,
+  onRecheck,
+  onRemove
+}: {
+  contextMenu: { torrentId: string; x: number; y: number };
+  torrent: TorrentSummary | undefined;
+  t: (key: string) => string;
+  onClose: () => void;
+  onRunSpeedDoctor: (torrent: TorrentSummary) => void | Promise<void>;
+  onPause: (id: string) => void | Promise<void>;
+  onResume: (id: string) => void | Promise<void>;
+  onRecheck: (id: string) => void | Promise<void>;
+  onRemove: (id: string) => void | Promise<void>;
+}) {
+  if (!torrent) {
+    return null;
+  }
+
+  const style = {
+    left: Math.min(contextMenu.x, window.innerWidth - 230),
+    top: Math.min(contextMenu.y, window.innerHeight - 230)
+  };
+
+  const run = (action: () => void | Promise<void>) => {
+    onClose();
+    void action();
+  };
+
+  return (
+    <div className="torrent-context-menu" style={style} role="menu">
+      <strong>{torrent.name}</strong>
+      <button
+        type="button"
+        role="menuitem"
+        onClick={() => run(() => onRunSpeedDoctor(torrent))}
+      >
+        {t("action.whySlow")}
+      </button>
+      {torrent.status === "paused" ? (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => run(() => onResume(torrent.id))}
+        >
+          {t("action.resume")}
+        </button>
+      ) : (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => run(() => onPause(torrent.id))}
+        >
+          {t("action.pause")}
+        </button>
+      )}
+      <button
+        type="button"
+        role="menuitem"
+        disabled={!torrent.recheckAvailable}
+        onClick={() => run(() => onRecheck(torrent.id))}
+      >
+        {t("action.recheck")}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className="danger"
+        onClick={() => run(() => onRemove(torrent.id))}
+      >
+        {t("action.removeFromList")}
+      </button>
+    </div>
+  );
+}
+
 function NetworkSettingsPanel({
   locale,
   networkDraft,
   networkState,
   diagnostics,
+  snapshot,
+  speedDoctorReports,
   t,
   onChange,
   onSave,
-  onRunDiagnostics
+  onRunDiagnostics,
+  onRunSpeedDoctor,
+  onSpeedDoctorAction
 }: {
   locale: Locale;
   networkDraft: NetworkSettings | null;
   networkState: NetworkSettingsState | null;
   diagnostics: NetworkDiagnosticsReport | null;
+  snapshot: TorrentCoreSnapshot;
+  speedDoctorReports: Record<string, TorrentSpeedDoctorReport>;
   t: (key: string) => string;
   onChange: (settings: NetworkSettings) => void;
   onSave: () => void;
   onRunDiagnostics: () => void;
+  onRunSpeedDoctor: (
+    id: string,
+    options?: { silent?: boolean; automatic?: boolean }
+  ) => Promise<TorrentSpeedDoctorReport | null>;
+  onSpeedDoctorAction: (
+    torrent: TorrentSummary,
+    report: TorrentSpeedDoctorReport,
+    actionId: SpeedDoctorActionId
+  ) => void | Promise<void>;
 }) {
   if (!networkDraft) {
     return (
@@ -1364,6 +2254,15 @@ function NetworkSettingsPanel({
           t={t}
         />
       ) : null}
+
+      <TorrentSpeedDiagnosticsPanel
+        snapshot={snapshot}
+        reports={speedDoctorReports}
+        locale={locale}
+        t={t}
+        onRunSpeedDoctor={onRunSpeedDoctor}
+        onAction={onSpeedDoctorAction}
+      />
     </form>
   );
 }
@@ -2107,6 +3006,72 @@ function NetworkDiagnosticsList({
   );
 }
 
+function TorrentSpeedDiagnosticsPanel({
+  snapshot,
+  reports,
+  locale,
+  t,
+  onRunSpeedDoctor,
+  onAction
+}: {
+  snapshot: TorrentCoreSnapshot;
+  reports: Record<string, TorrentSpeedDoctorReport>;
+  locale: Locale;
+  t: (key: string) => string;
+  onRunSpeedDoctor: (
+    id: string,
+    options?: { silent?: boolean; automatic?: boolean }
+  ) => Promise<TorrentSpeedDoctorReport | null>;
+  onAction: (
+    torrent: TorrentSummary,
+    report: TorrentSpeedDoctorReport,
+    actionId: SpeedDoctorActionId
+  ) => void | Promise<void>;
+}) {
+  const torrents = snapshot.torrents.filter(
+    (torrent) => torrent.status === "downloading" || torrent.status === "queued"
+  );
+
+  return (
+    <section className="diagnostics-list" aria-label={t("speedDoctor.networkTitle")}>
+      <div className="section-heading">
+        <h3>{t("speedDoctor.networkTitle")}</h3>
+        <span>{t("speedDoctor.networkSubtitle")}</span>
+      </div>
+      {torrents.length === 0 ? (
+        <p className="file-pending">{t("speedDoctor.noActiveTorrents")}</p>
+      ) : (
+        torrents.map((torrent) => (
+          <div className="torrent-diagnostic-item" key={torrent.id}>
+            <div className="section-heading">
+              <strong>{torrent.name}</strong>
+              <button
+                type="button"
+                className="secondary small-button"
+                onClick={() => void onRunSpeedDoctor(torrent.id)}
+              >
+                {t("action.whySlow")}
+              </button>
+            </div>
+            {reports[torrent.id] ? (
+              <SpeedDoctorReportCard
+                report={reports[torrent.id]}
+                locale={locale}
+                t={t}
+                onAction={(actionId) =>
+                  onAction(torrent, reports[torrent.id], actionId)
+                }
+              />
+            ) : (
+              <TorrentHealthBadge report={undefined} t={t} />
+            )}
+          </div>
+        ))
+      )}
+    </section>
+  );
+}
+
 function TorrentLabelsEditor({
   torrent,
   t,
@@ -2329,6 +3294,124 @@ function getAddOptions(
     category,
     tags
   };
+}
+
+function readStoredDownloadProfile(): DownloadProfileId {
+  try {
+    const value = window.localStorage.getItem(LAST_DOWNLOAD_PROFILE_KEY);
+    return DOWNLOAD_PROFILE_IDS.includes(value as DownloadProfileId)
+      ? (value as DownloadProfileId)
+      : "manual";
+  } catch {
+    return "manual";
+  }
+}
+
+function storeDownloadProfile(profileId: DownloadProfileId) {
+  try {
+    window.localStorage.setItem(LAST_DOWNLOAD_PROFILE_KEY, profileId);
+  } catch {
+    // Local storage can be unavailable in restricted WebUI contexts.
+  }
+}
+
+function createTorrentAssistantInput({
+  torrent,
+  selectedProfileId,
+  activeDownloadCount,
+  favoriteFolders,
+  existingFileNames,
+  networkProfileId,
+  privateMode,
+  activeSpeedSchedule,
+  disk
+}: {
+  torrent: TorrentSummary;
+  selectedProfileId?: DownloadProfileId;
+  activeDownloadCount: number;
+  favoriteFolders: FavoriteFolderSettings[];
+  existingFileNames: string[];
+  networkProfileId?: string | null;
+  privateMode?: boolean;
+  activeSpeedSchedule: boolean;
+  disk?: { availableBytes: number; totalBytes?: number } | null;
+}) {
+  return {
+    selectedProfileId,
+    category: torrent.category,
+    tags: torrent.tags,
+    favoriteFolders,
+    activeDownloadCount,
+    networkProfileId,
+    privateMode,
+    activeSpeedSchedule,
+    sizeBytes: torrent.sizeBytes,
+    files: torrent.files.map((file) => ({
+      name: file.name,
+      path: file.path,
+      lengthBytes: file.lengthBytes,
+      selected: file.selected
+    })),
+    savePath: torrent.savePath,
+    disk,
+    existingFileNames: existingFileNames.filter(
+      (name) => !torrent.files.some((file) => file.path === name || file.name === name)
+    ),
+    metadataReady: torrent.metadataReady,
+    privateTorrent: torrent.private,
+    seeds: torrent.seeds,
+    peers: torrent.peers,
+    sourceType: torrent.sourceType
+  };
+}
+
+function findSpeedDoctorCandidate(torrents: TorrentSummary[]) {
+  return (
+    torrents.find(
+      (torrent) =>
+        torrent.status === "downloading" &&
+        (torrent.downloadSpeedBytes < AUTO_SPEED_DOCTOR_LOW_SPEED_BYTES ||
+          torrent.peers === 0)
+    ) ??
+    torrents.find((torrent) => torrent.status === "downloading") ??
+    torrents.find((torrent) => torrent.status === "queued") ??
+    null
+  );
+}
+
+function formatAssistantSuggestion(
+  suggestion: SmartAssistantSuggestion,
+  t: (key: string) => string
+) {
+  if (suggestion.type === "folder") {
+    return `${t("assistant.suggestion.folder")}: ${
+      suggestion.label ?? suggestion.value
+    }`;
+  }
+
+  if (suggestion.type === "category") {
+    return `${t("assistant.suggestion.category")}: ${suggestion.value}`;
+  }
+
+  if (suggestion.type === "tags") {
+    return `${t("assistant.suggestion.tags")}: ${suggestion.value}`;
+  }
+
+  if (suggestion.type === "file_priority") {
+    return t("assistant.suggestion.filePriority");
+  }
+
+  if (suggestion.type === "start_paused") {
+    return t("assistant.suggestion.startPaused");
+  }
+
+  if (suggestion.type === "recheck_after_complete") {
+    return t("assistant.suggestion.recheck");
+  }
+
+  return `${t("assistant.suggestion.profileTemplate")}: ${t(
+    `profile.${suggestion.value}`
+  )}`;
 }
 
 function replaceById<T extends { id: string }>(
@@ -2656,6 +3739,51 @@ function formatEta(seconds: number | null, fallback: string) {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
   return `${minutes}m ${remainingSeconds}s`;
+}
+
+function formatSpeedDoctorEvidence(
+  value: string | number | boolean | null,
+  code: string,
+  locale: Locale
+) {
+  if (value === null) {
+    return "";
+  }
+
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+
+  if (typeof value === "number") {
+    if (code === "global_download_limit") {
+      return formatSpeed(value);
+    }
+
+    if (code === "disk_space_low") {
+      return formatBytes(value);
+    }
+
+    return new Intl.NumberFormat(locale).format(value);
+  }
+
+  return value;
+}
+
+function formatSpeedDoctorTechnicalReport(report: TorrentSpeedDoctorReport) {
+  return JSON.stringify(
+    {
+      generatedAt: report.generatedAt,
+      torrentId: report.torrentId,
+      status: report.status,
+      primaryReason: report.primaryReason,
+      reasons: report.reasons,
+      actions: report.actions,
+      technicalDetails: report.technicalDetails,
+      redacted: report.redacted
+    },
+    null,
+    2
+  );
 }
 
 function toNonNegativeNumber(value: number | null | undefined) {

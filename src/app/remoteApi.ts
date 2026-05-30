@@ -10,8 +10,10 @@ import type {
   TorrentCoreEvent,
   TorrentCoreResult,
   TorrentCoreSnapshot,
+  TorrentSpeedDoctorReport,
   TorrentSummary,
   UpdateTorrentLabelsRequest,
+  UpdateTorrentProfileRequest,
   WatchFolderScanResult
 } from "../../electron/torrentCore/contracts";
 
@@ -81,6 +83,17 @@ export function createRemoteTorrentApi(getPassword: () => string): TorrentApi {
         }
       );
     },
+    updateProfile: (request: UpdateTorrentProfileRequest) => {
+      const { id, ...body } = request;
+      return apiRequest<TorrentSummary>(
+        `/api/torrents/${encodeURIComponent(id)}/profile`,
+        getPassword,
+        {
+          method: "PATCH",
+          body: JSON.stringify(body)
+        }
+      );
+    },
     setFilePriority: (request: SetTorrentFilePriorityRequest) => {
       const { id, fileIndex, ...body } = request;
       return apiRequest<TorrentSummary>(
@@ -109,6 +122,11 @@ export function createRemoteTorrentApi(getPassword: () => string): TorrentApi {
           message: "Network diagnostics are available only in the desktop app."
         }
       }) as Promise<TorrentCoreResult<NetworkDiagnosticsReport>>,
+    runSpeedDoctor: (id: string) =>
+      apiRequest<TorrentSpeedDoctorReport>(
+        `/api/torrents/${encodeURIComponent(id)}/speed-doctor`,
+        getPassword
+      ),
     getAutomationSettings: () =>
       apiRequest<AutomationSettingsState>("/api/automation-settings", getPassword),
     updateAutomationSettings: (request: AutomationSettings) =>

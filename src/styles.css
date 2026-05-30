@@ -27,6 +27,7 @@ select,
 input,
 textarea {
   font: inherit;
+  max-width: 100%;
 }
 
 .app-shell {
@@ -118,6 +119,8 @@ textarea {
   display: grid;
   align-content: start;
   gap: 24px;
+  min-width: 0;
+  overflow-x: hidden;
   padding: 30px;
 }
 
@@ -185,7 +188,7 @@ p {
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 14px;
 }
 
@@ -221,10 +224,23 @@ p {
   font-size: 24px;
 }
 
+.diagnostic-metric {
+  align-content: center;
+}
+
+.diagnostic-metric button {
+  justify-self: start;
+}
+
 .content-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
   gap: 18px;
+  min-width: 0;
+}
+
+.content-layout > * {
+  min-width: 0;
 }
 
 .downloads-panel {
@@ -337,6 +353,81 @@ button:disabled {
   background: #f2f6ff;
 }
 
+.smart-assistant-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px 0;
+  border-top: 1px solid #e7edf6;
+  border-bottom: 1px solid #e7edf6;
+}
+
+.metadata-assistant-panel,
+.speed-doctor-hint {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+}
+
+.metadata-assistant-panel p,
+.speed-doctor-hint p {
+  margin-bottom: 0;
+}
+
+.speed-doctor-hint {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.recommendation-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recommendation-main strong {
+  overflow-wrap: anywhere;
+  color: #101828;
+}
+
+.reason-list,
+.warning-list,
+.doctor-reasons {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.warning-list {
+  color: #92400e;
+}
+
+.assistant-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.assistant-suggestion-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 6px 9px;
+  border: 1px solid #d7deea;
+  border-radius: 999px;
+  color: #475467;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .torrent-list {
   display: grid;
   gap: 12px;
@@ -400,6 +491,33 @@ button:disabled {
 
 .torrent-main p {
   margin-bottom: 0;
+}
+
+.health-badge {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 8px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: #475467;
+  background: #eef2f8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.health-badge.ok {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.health-badge.warning {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.health-badge.critical {
+  color: #b42318;
+  background: #fee4e2;
 }
 
 .torrent-main strong {
@@ -523,10 +641,111 @@ button:disabled {
   gap: 10px;
 }
 
+.speed-doctor-card {
+  display: grid;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid #e7edf6;
+}
+
+.torrent-diagnostic-item {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e7edf6;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.torrent-diagnostic-item > .section-heading strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #101828;
+  font-size: 13px;
+}
+
+.torrent-context-menu {
+  position: fixed;
+  z-index: 20;
+  display: grid;
+  width: min(230px, calc(100vw - 20px));
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid #d7deea;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 48px rgba(16, 24, 40, 0.18);
+}
+
+.torrent-context-menu strong {
+  padding: 8px;
+  overflow-wrap: anywhere;
+  color: #101828;
+  font-size: 12px;
+}
+
+.torrent-context-menu button {
+  width: 100%;
+  padding: 8px 10px;
+  border-color: transparent;
+  color: #344054;
+  background: transparent;
+  text-align: left;
+}
+
+.torrent-context-menu button:hover {
+  background: #f2f6ff;
+}
+
+.speed-doctor-card p {
+  margin-bottom: 0;
+}
+
+.doctor-reasons li {
+  display: grid;
+  gap: 2px;
+}
+
+.doctor-reasons strong {
+  color: #101828;
+  font-size: 13px;
+}
+
+.doctor-reasons span {
+  color: #667085;
+  font-size: 12px;
+}
+
+.doctor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.doctor-details summary {
+  cursor: pointer;
+  color: #475467;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.doctor-details pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 10px 0 0;
+  padding: 12px;
+  border-radius: 8px;
+  color: #101828;
+  background: #f8fafc;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
 .assistant-panel {
   display: grid;
   gap: 16px;
   align-self: start;
+  min-width: 0;
   padding: 22px;
 }
 
@@ -720,7 +939,9 @@ button:disabled {
   h1,
   h2,
   h3,
+  .recommendation-main strong,
   .file-main strong,
+  .doctor-reasons strong,
   .torrent-main strong,
   .torrent-stats dd,
     .metric-card strong,
@@ -750,6 +971,8 @@ button:disabled {
     .labels-editor label,
     .toggle-line,
     .safety-note,
+    .reason-list,
+    .doctor-details summary,
     .file-main span,
     .queue-row span,
   .file-pending,
@@ -781,8 +1004,30 @@ button:disabled {
     background: #111827;
   }
 
+  button.secondary,
+  .actions .secondary {
+    color: #bfdbfe;
+  }
+
+  button.danger {
+    border-color: #7f1d1d;
+    color: #fecaca;
+  }
+
+  button:disabled {
+    border-color: #334155;
+    color: #94a3b8;
+    background: #0f172a;
+  }
+
   .status-message {
     color: #dbeafe;
+    background: #172554;
+  }
+
+  .metadata-assistant-panel,
+  .speed-doctor-hint {
+    border-color: #1e3a8a;
     background: #172554;
   }
 
@@ -792,6 +1037,8 @@ button:disabled {
 
   .labels-editor,
   .torrent-files,
+  .smart-assistant-card,
+  .speed-doctor-card,
   .assistant-panel > div + div,
   .remote-access-settings,
   .automation-section,
@@ -801,6 +1048,8 @@ button:disabled {
   }
 
   .file-list,
+  .torrent-diagnostic-item,
+  .torrent-context-menu,
   .diagnostic-item,
   .queue-row {
     border-color: #233047;
@@ -824,6 +1073,33 @@ button:disabled {
     background: #111827;
   }
 
+  .torrent-diagnostic-item,
+  .torrent-context-menu {
+    background: #111827;
+  }
+
+  .torrent-context-menu strong,
+  .torrent-diagnostic-item > .section-heading strong {
+    color: #f8fafc;
+  }
+
+  .torrent-context-menu button {
+    color: #e5e7eb;
+  }
+
+  .torrent-context-menu button:hover {
+    background: #172554;
+  }
+
+  .doctor-details pre {
+    color: #e5e7eb;
+    background: #020617;
+  }
+
+  .warning-list {
+    color: #fbbf24;
+  }
+
   .diagnostic-item.warning {
     border-color: #854d0e;
     background: #422006;
@@ -844,6 +1120,16 @@ button:disabled {
   }
 }
 
+@media (max-width: 1280px) {
+  .content-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .assistant-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 900px) {
   .app-shell {
     grid-template-columns: minmax(0, 1fr);
@@ -858,9 +1144,8 @@ button:disabled {
 
   .nav-list {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
-    overflow-x: auto;
-    padding-bottom: 2px;
   }
 
   .nav-item {
@@ -894,6 +1179,10 @@ button:disabled {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .speed-doctor-hint {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .torrent-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -904,6 +1193,7 @@ button:disabled {
   }
 
   .row-actions button,
+  .doctor-actions button,
   .labels-editor button {
     width: 100%;
   }

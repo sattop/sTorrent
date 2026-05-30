@@ -6,7 +6,7 @@
 
 `sTorent` is a Windows desktop BitTorrent client with a clean interface, transparent network settings, Smart Download Assistant foundations, and Speed Doctor diagnostics.
 
-The project is currently an MVP. Core torrent operations work, Windows builds are published automatically, and the next stages focus on release polish, stability, and smarter recommendations.
+The project is currently an MVP. Core torrent operations work, Windows builds are published automatically, and the next stages focus on stability, auto-update, and smarter recommendations.
 
 ## Download
 
@@ -14,7 +14,7 @@ Latest release: [sTorent v0.1.0](https://github.com/sattop/sTorrent/releases/tag
 
 Download the Windows installer:
 
-[sTorent Setup.exe](https://github.com/sattop/sTorrent/releases/download/v0.1.0/sTorent.Setup.exe)
+[sTorent Setup.exe](https://github.com/sattop/sTorrent/releases/download/v0.1.0/sTorent%20Setup.exe)
 
 The release also includes `SHA256SUMS.txt` for checksum verification.
 
@@ -99,9 +99,9 @@ release/sTorent Setup.exe
 
 GitHub Actions are configured for:
 
-- build checks on pushes and pull requests to `main`;
+- build checks on branch pushes and pull requests to `main`;
 - Windows installer builds on tags matching `v*`;
-- GitHub Release publishing with `.exe` and `SHA256SUMS.txt`.
+- GitHub Release publishing with `.exe`, `SHA256SUMS.txt`, and changelog notes.
 
 Create a release by pushing a version tag:
 

@@ -9,6 +9,7 @@ import {
   type SetTorrentFilePriorityRequest,
   type TorrentCoreEvent,
   type TorrentCoreResult,
+  type UpdateTorrentProfileRequest,
   type UpdateTorrentLabelsRequest
 } from "./contracts.js";
 import type { WebTorrentCore } from "./webtorrentCore.js";
@@ -72,6 +73,12 @@ export function registerTorrentCoreIpc(core: WebTorrentCore) {
   );
 
   ipcMain.handle(
+    TORRENT_IPC_CHANNELS.updateProfile,
+    async (_event, request: UpdateTorrentProfileRequest) =>
+      toResult(() => core.updateProfile(request))
+  );
+
+  ipcMain.handle(
     TORRENT_IPC_CHANNELS.setFilePriority,
     async (_event, request: SetTorrentFilePriorityRequest) =>
       toResult(() => core.setFilePriority(request))
@@ -93,6 +100,10 @@ export function registerTorrentCoreIpc(core: WebTorrentCore) {
 
   ipcMain.handle(TORRENT_IPC_CHANNELS.runNetworkDiagnostics, async () =>
     toResult(() => core.runNetworkDiagnostics())
+  );
+
+  ipcMain.handle(TORRENT_IPC_CHANNELS.runSpeedDoctor, async (_event, id: string) =>
+    toResult(() => core.runSpeedDoctor(id))
   );
 
   ipcMain.handle(TORRENT_IPC_CHANNELS.getAutomationSettings, async () =>

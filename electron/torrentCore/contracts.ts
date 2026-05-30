@@ -49,7 +49,8 @@ export const TORRENT_CORE_EVENT_NAMES = [
   "automation.watch.added",
   "automation.watch.scan.completed",
   "settings.changed",
-  "diagnostics.speed.checked"
+  "diagnostics.speed.checked",
+  "diagnostics.torrent_speed.checked"
 ] as const;
 
 export const TORRENT_CORE_EVENT_CHANNEL = "torrent:event";
@@ -62,11 +63,13 @@ export const TORRENT_IPC_CHANNELS = {
   remove: "torrent:remove",
   recheck: "torrent:recheck",
   updateLabels: "torrent:updateLabels",
+  updateProfile: "torrent:updateProfile",
   setFilePriority: "torrent:setFilePriority",
   getSnapshot: "torrent:getSnapshot",
   getNetworkSettings: "torrent:getNetworkSettings",
   updateNetworkSettings: "torrent:updateNetworkSettings",
   runNetworkDiagnostics: "torrent:runNetworkDiagnostics",
+  runSpeedDoctor: "torrent:runSpeedDoctor",
   getAutomationSettings: "torrent:getAutomationSettings",
   updateAutomationSettings: "torrent:updateAutomationSettings",
   runWatchFolderScan: "torrent:runWatchFolderScan"
@@ -98,6 +101,59 @@ export type TorrentSourceType = "torrent_file" | "magnet";
 export const TORRENT_FILE_PRIORITIES = ["skip", "normal", "high"] as const;
 
 export type TorrentFilePriority = (typeof TORRENT_FILE_PRIORITIES)[number];
+
+export const SPEED_DOCTOR_ACTION_IDS = [
+  "resume_torrent",
+  "remove_temporary_limit",
+  "switch_download_profile",
+  "toggle_dht_for_public_torrent",
+  "check_port",
+  "enable_upnp_nat_pmp",
+  "choose_network_interface",
+  "check_proxy",
+  "move_up_queue",
+  "raise_file_priority",
+  "open_folder",
+  "recheck_data",
+  "show_trackers",
+  "copy_report"
+] as const;
+
+export type SpeedDoctorActionId = (typeof SPEED_DOCTOR_ACTION_IDS)[number];
+
+export const SPEED_DOCTOR_REASON_CODES = [
+  "torrent_paused",
+  "torrent_queued",
+  "global_download_limit",
+  "active_speed_schedule",
+  "traffic_saver_profile",
+  "low_seed_count",
+  "no_connected_peers",
+  "tracker_error",
+  "incoming_port_closed",
+  "incoming_port_auto",
+  "incoming_port_unverified",
+  "public_discovery_disabled",
+  "private_discovery_enabled",
+  "proxy_unsupported",
+  "proxy_connection_failed",
+  "interface_unavailable",
+  "disk_space_low",
+  "disk_stalled",
+  "file_locked",
+  "queue_busy",
+  "low_file_priority",
+  "dead_torrent",
+  "recent_errors",
+  "all_files_skipped",
+  "metadata_pending"
+] as const;
+
+export type SpeedDoctorReasonCode =
+  (typeof SPEED_DOCTOR_REASON_CODES)[number];
+
+export type SpeedDoctorReportStatus = "ok" | "warning" | "critical";
+export type SpeedDoctorReasonSeverity = "low" | "medium" | "high";
 
 export interface TorrentFileInfo {
   index: number;
@@ -132,6 +188,12 @@ export interface TorrentSummary {
   category: string | null;
   tags: string[];
   files: TorrentFileInfo[];
+  addedAt: string;
+  metadataReceivedAt: string | null;
+  lastActivityAt: string | null;
+  lastError: string | null;
+  trackerHosts: string[];
+  connectedSeeds: number;
 }
 
 export interface TorrentAddOptions {
@@ -155,6 +217,11 @@ export interface UpdateTorrentLabelsRequest {
   id: string;
   category?: string | null;
   tags?: string[];
+}
+
+export interface UpdateTorrentProfileRequest {
+  id: string;
+  profileId: DownloadProfileId;
 }
 
 export interface SetTorrentFilePriorityRequest {
@@ -382,6 +449,90 @@ export interface NetworkDiagnosticsReport {
   redacted: true;
 }
 
+export interface SpeedDoctorReason {
+  code: SpeedDoctorReasonCode;
+  severity: SpeedDoctorReasonSeverity;
+  evidence?: string | number | boolean | null;
+  actionId?: SpeedDoctorActionId;
+}
+
+export interface SpeedDoctorDiskDetails {
+  availableBytes: number;
+  totalBytes: number;
+  remainingBytes: number;
+  stalledSeconds: number | null;
+  lockedFileCount: number;
+}
+
+export type SpeedDoctorProbeStatus =
+  | "ok"
+  | "warning"
+  | "failed"
+  | "unknown"
+  | "unsupported";
+
+export interface SpeedDoctorRuntimeInput {
+  activeTorrentCount: number;
+  activeDownloadCount: number;
+  connectedSeeds: number;
+  queuedPeerCount: number;
+  trackerHosts: string[];
+  trackerErrorCount: number;
+  lastTrackerError: string | null;
+  noPeersSources: string[];
+  recentErrors: string[];
+  stalledSeconds: number | null;
+  lockedFileCount: number;
+  incomingPortProbe: SpeedDoctorProbeStatus;
+  proxyProbe: SpeedDoctorProbeStatus;
+}
+
+export interface SpeedDoctorTechnicalDetails {
+  torrent: {
+    id: string;
+    status: TorrentStatus;
+    progress: number;
+    downloadSpeedBytes: number;
+    uploadSpeedBytes: number;
+    seeds: number;
+    peers: number;
+    selectedProfileId: DownloadProfileId;
+    private: boolean;
+    sourceType: TorrentSourceType;
+    metadataReady: boolean;
+    fileCount: number;
+    selectedFileCount: number;
+    lowPrioritySelectedFileCount: number;
+  };
+  network: {
+    profileId: NetworkProfileId;
+    dht: boolean;
+    pex: boolean;
+    lsd: boolean;
+    incomingPortConfigured: boolean;
+    upnp: boolean;
+    natPmp: boolean;
+    downloadLimitBytesPerSecond: number | null;
+    uploadLimitBytesPerSecond: number | null;
+    proxyType: ProxyType;
+    interfaceSelected: boolean;
+    activeSpeedScheduleId: string | null;
+  };
+  runtime: SpeedDoctorRuntimeInput;
+  disk: SpeedDoctorDiskDetails | null;
+}
+
+export interface TorrentSpeedDoctorReport {
+  generatedAt: string;
+  torrentId: string;
+  status: SpeedDoctorReportStatus;
+  primaryReason: SpeedDoctorReasonCode | null;
+  reasons: SpeedDoctorReason[];
+  actions: SpeedDoctorActionId[];
+  technicalDetails: SpeedDoctorTechnicalDetails;
+  redacted: true;
+}
+
 export interface TorrentCoreErrorPayload {
   id: string | null;
   message: string;
@@ -421,6 +572,10 @@ export interface DiagnosticsSpeedCheckedPayload {
   report: NetworkDiagnosticsReport;
 }
 
+export interface DiagnosticsTorrentSpeedCheckedPayload {
+  report: TorrentSpeedDoctorReport;
+}
+
 export interface TorrentCoreEventPayloadMap {
   "torrent.added": TorrentSummary;
   "torrent.metadata.received": TorrentSummary;
@@ -436,6 +591,7 @@ export interface TorrentCoreEventPayloadMap {
   "automation.watch.scan.completed": AutomationWatchScanCompletedPayload;
   "settings.changed": SettingsChangedPayload;
   "diagnostics.speed.checked": DiagnosticsSpeedCheckedPayload;
+  "diagnostics.torrent_speed.checked": DiagnosticsTorrentSpeedCheckedPayload;
 }
 
 export type TorrentCoreEvent = {

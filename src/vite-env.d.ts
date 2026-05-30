@@ -14,8 +14,10 @@ import type {
   TorrentCoreEvent,
   TorrentCoreResult,
   TorrentCoreSnapshot,
+  TorrentSpeedDoctorReport,
   TorrentSummary,
   UpdateTorrentLabelsRequest,
+  UpdateTorrentProfileRequest,
   WatchFolderScanResult
 } from "../electron/torrentCore/contracts";
 
@@ -38,6 +40,9 @@ declare global {
         updateLabels(
           request: UpdateTorrentLabelsRequest
         ): Promise<TorrentCoreResult<TorrentSummary>>;
+        updateProfile(
+          request: UpdateTorrentProfileRequest
+        ): Promise<TorrentCoreResult<TorrentSummary>>;
         setFilePriority(
           request: SetTorrentFilePriorityRequest
         ): Promise<TorrentCoreResult<TorrentSummary>>;
@@ -49,6 +54,9 @@ declare global {
         runNetworkDiagnostics(): Promise<
           TorrentCoreResult<NetworkDiagnosticsReport>
         >;
+        runSpeedDoctor(
+          id: string
+        ): Promise<TorrentCoreResult<TorrentSpeedDoctorReport>>;
         getAutomationSettings(): Promise<
           TorrentCoreResult<AutomationSettingsState>
         >;

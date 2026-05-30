@@ -20,6 +20,7 @@ import {
   buildWebTorrentAddOptions
 } from "../electron/torrentCore/profiles";
 import { createNetworkDiagnosticsReport } from "../electron/torrentCore/networkDiagnostics";
+import { createTorrentSpeedDoctorReport } from "../electron/torrentCore/speedDoctor";
 import {
   DEFAULT_NETWORK_SETTINGS,
   NETWORK_CAPABILITIES,
@@ -206,6 +207,148 @@ describe("torrent-core contracts", () => {
       ])
     );
     expect(JSON.stringify(report)).not.toContain("impersonate");
+  });
+
+  it("diagnoses torrent-specific speed blockers with a redacted report", () => {
+    const settings = normalizeNetworkSettings({
+      ...DEFAULT_NETWORK_SETTINGS,
+      speedLimits: {
+        downloadBytesPerSecond: 256 * 1024,
+        uploadBytesPerSecond: null
+      }
+    });
+    const torrent = {
+      ...createTestTorrentSummary(),
+      status: "paused" as const,
+      sizeBytes: 10 * 1024 * 1024,
+      downloadedBytes: 1024,
+      savePath: "D:/Downloads/private-folder"
+    };
+    const report = createTorrentSpeedDoctorReport({
+      torrent,
+      network: createTestNetworkState(settings),
+      automation: createTestAutomationState("day-limit"),
+      disk: {
+        availableBytes: 512 * 1024,
+        totalBytes: 20 * 1024 * 1024
+      }
+    });
+
+    expect(report.status).toBe("critical");
+    expect(report.reasons.map((reason) => reason.code)).toEqual(
+      expect.arrayContaining([
+        "torrent_paused",
+        "global_download_limit",
+        "active_speed_schedule",
+        "disk_space_low"
+      ])
+    );
+    expect(report.actions).toContain("copy_report");
+    expect(report.redacted).toBe(true);
+    expect(JSON.stringify(report)).not.toContain("private-folder");
+  });
+
+  it("does not suggest unsafe public discovery changes for private torrents", () => {
+    const settings = applyNetworkProfile(
+      DEFAULT_NETWORK_SETTINGS,
+      "private_tracker"
+    );
+    const report = createTorrentSpeedDoctorReport({
+      torrent: {
+        ...createTestTorrentSummary(),
+        private: true,
+        selectedProfileId: "private_tracker"
+      },
+      network: createTestNetworkState(settings),
+      automation: createTestAutomationState(),
+      disk: null
+    });
+
+    expect(report.reasons.map((reason) => reason.code)).not.toContain(
+      "public_discovery_disabled"
+    );
+    expect(JSON.stringify(report)).not.toContain("impersonate");
+  });
+
+  it("diagnoses live runtime blockers without leaking tracker secrets", () => {
+    const settings = normalizeNetworkSettings({
+      ...DEFAULT_NETWORK_SETTINGS,
+      incomingPort: 51413,
+      proxy: {
+        ...DEFAULT_NETWORK_SETTINGS.proxy,
+        type: "socks5",
+        host: "127.0.0.1",
+        port: 1080
+      }
+    });
+    const report = createTorrentSpeedDoctorReport({
+      torrent: {
+        ...createTestTorrentSummary(),
+        selectedProfileId: "stream_while_downloading",
+        peers: 2,
+        files: [
+          {
+            index: 0,
+            name: "Movie.mkv",
+            path: "Movie.mkv",
+            lengthBytes: 1024,
+            downloadedBytes: 0,
+            progress: 0,
+            priority: "normal",
+            selected: true
+          }
+        ]
+      },
+      network: {
+        settings,
+        activeSettings: settings,
+        restartRequired: false,
+        capabilities: {
+          ...NETWORK_CAPABILITIES,
+          proxy: true
+        },
+        availableInterfaces: []
+      },
+      automation: createTestAutomationState(),
+      disk: {
+        availableBytes: 10 * 1024 * 1024 * 1024,
+        totalBytes: 20 * 1024 * 1024 * 1024
+      },
+      runtime: {
+        activeTorrentCount: 4,
+        activeDownloadCount: 3,
+        connectedSeeds: 0,
+        queuedPeerCount: 0,
+        trackerHosts: ["tracker.example"],
+        trackerErrorCount: 1,
+        lastTrackerError:
+          "announce failed: https://tracker.example/passkey/secret-token",
+        noPeersSources: [],
+        recentErrors: ["tracker timeout for secret-token"],
+        stalledSeconds: 90,
+        lockedFileCount: 1,
+        incomingPortProbe: "failed",
+        proxyProbe: "failed"
+      }
+    });
+
+    expect(report.reasons.map((reason) => reason.code)).toEqual(
+      expect.arrayContaining([
+        "incoming_port_unverified",
+        "proxy_connection_failed",
+        "disk_stalled",
+        "file_locked",
+        "queue_busy",
+        "low_file_priority",
+        "recent_errors",
+        "tracker_error"
+      ])
+    );
+    expect(report.technicalDetails.disk).toMatchObject({
+      stalledSeconds: 90,
+      lockedFileCount: 1
+    });
+    expect(JSON.stringify(report)).not.toContain("secret-token");
   });
 
   it("normalizes stage 5 automation settings without unsafe data removal", () => {
@@ -397,7 +540,47 @@ describe("torrent-core contracts", () => {
       }),
       recheck: async () => ({ ...torrent, status: "checking" }),
       updateLabels: () => torrent,
+      updateProfile: (request) => {
+        calls.push(`profile:${request.id}:${request.profileId}`);
+        return {
+          ...torrent,
+          id: request.id,
+          selectedProfileId: request.profileId
+        };
+      },
       setFilePriority: () => torrent,
+      runSpeedDoctor: async (id) =>
+        createTorrentSpeedDoctorReport({
+          torrent: { ...torrent, id },
+          network: {
+            settings: DEFAULT_NETWORK_SETTINGS,
+            activeSettings: DEFAULT_NETWORK_SETTINGS,
+            restartRequired: false,
+            capabilities: NETWORK_CAPABILITIES,
+            availableInterfaces: []
+          },
+          automation: {
+            settings: {
+              watchFolders: [],
+              favoriteFolders: [],
+              seedingRules: [],
+              rssRules: [],
+              speedSchedules: [],
+              hooksEnabled: false
+            },
+            capabilities: {
+              watchFolders: true,
+              favoriteFolders: true,
+              seedingRules: true,
+              rssDuplicatePrevention: true,
+              speedLimitSchedules: true,
+              hooks: false,
+              safeDataRemovalOnly: true
+            },
+            activeSpeedScheduleId: null
+          },
+          disk: null
+        }),
       getSnapshot: () => ({
         torrents: [torrent],
         downloadSpeedBytes: 0,
@@ -505,6 +688,25 @@ describe("torrent-core contracts", () => {
         value: { id: torrent.id, status: "paused" }
       });
       expect(calls).toContain(`pause:${torrent.id}`);
+
+      const profile = await fetch(
+        `${state.runtime.origin}/api/torrents/${torrent.id}/profile`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: "Bearer correct horse",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ profileId: "max_speed" })
+        }
+      );
+      const profileResult = await profile.json();
+
+      expect(profileResult).toMatchObject({
+        ok: true,
+        value: { id: torrent.id, selectedProfileId: "max_speed" }
+      });
+      expect(calls).toContain(`profile:${torrent.id}:max_speed`);
     } finally {
       await server.shutdown();
     }
@@ -531,6 +733,39 @@ async function getFreePort() {
   return address.port;
 }
 
+function createTestNetworkState(settings = DEFAULT_NETWORK_SETTINGS) {
+  return {
+    settings,
+    activeSettings: settings,
+    restartRequired: false,
+    capabilities: NETWORK_CAPABILITIES,
+    availableInterfaces: []
+  };
+}
+
+function createTestAutomationState(activeSpeedScheduleId: string | null = null) {
+  return {
+    settings: {
+      watchFolders: [],
+      favoriteFolders: [],
+      seedingRules: [],
+      rssRules: [],
+      speedSchedules: [],
+      hooksEnabled: false as const
+    },
+    capabilities: {
+      watchFolders: true,
+      favoriteFolders: true,
+      seedingRules: true,
+      rssDuplicatePrevention: true,
+      speedLimitSchedules: true,
+      hooks: false as const,
+      safeDataRemovalOnly: true as const
+    },
+    activeSpeedScheduleId
+  };
+}
+
 function createTestTorrentSummary() {
   return {
     id: "abc123",
@@ -544,8 +779,14 @@ function createTestTorrentSummary() {
     uploadSpeedBytes: 0,
     seeds: 0,
     peers: 0,
+    connectedSeeds: 0,
     etaSeconds: null,
     savePath: "D:/Downloads",
+    addedAt: "2026-01-01T00:00:00.000Z",
+    metadataReceivedAt: "2026-01-01T00:00:01.000Z",
+    lastActivityAt: "2026-01-01T00:00:02.000Z",
+    lastError: null,
+    trackerHosts: [],
     metadataReady: true,
     private: false,
     sourceType: "magnet" as const,

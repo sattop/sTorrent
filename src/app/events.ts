@@ -14,6 +14,7 @@ export const CORE_EVENTS = [
   "automation.watch.added",
   "automation.watch.scan.completed",
   "diagnostics.speed.checked",
+  "diagnostics.torrent_speed.checked",
   "settings.changed"
 ] as const;
 
@@ -26,6 +27,7 @@ export const UI_COMMANDS = [
   "torrent.setPriority",
   "torrent.setFilePriority",
   "torrent.updateLabels",
+  "torrent.updateProfile",
   "automation.update",
   "automation.scanWatchFolders",
   "settings.update",

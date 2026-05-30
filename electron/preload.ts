@@ -16,8 +16,10 @@ import {
   type TorrentCoreEvent,
   type TorrentCoreResult,
   type TorrentCoreSnapshot,
+  type TorrentSpeedDoctorReport,
   type TorrentSummary,
   type UpdateTorrentLabelsRequest,
+  type UpdateTorrentProfileRequest,
   type WatchFolderScanResult
 } from "./torrentCore/contracts.js";
 
@@ -53,6 +55,10 @@ contextBridge.exposeInMainWorld("storent", {
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.updateLabels, request) as Promise<
         TorrentCoreResult<TorrentSummary>
       >,
+    updateProfile: (request: UpdateTorrentProfileRequest) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.updateProfile, request) as Promise<
+        TorrentCoreResult<TorrentSummary>
+      >,
     setFilePriority: (request: SetTorrentFilePriorityRequest) =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.setFilePriority, request) as Promise<
         TorrentCoreResult<TorrentSummary>
@@ -73,6 +79,10 @@ contextBridge.exposeInMainWorld("storent", {
     runNetworkDiagnostics: () =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.runNetworkDiagnostics) as Promise<
         TorrentCoreResult<NetworkDiagnosticsReport>
+      >,
+    runSpeedDoctor: (id: string) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.runSpeedDoctor, id) as Promise<
+        TorrentCoreResult<TorrentSpeedDoctorReport>
       >,
     getAutomationSettings: () =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.getAutomationSettings) as Promise<

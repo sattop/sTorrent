@@ -20,6 +20,8 @@
     "build:windows": "npm run build:icons && npm run build && electron-builder --win nsis --x64 --publish never",
     "lint:types": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
     "audit:security": "node scripts/audit-security.mjs",
+    "release:notes": "node scripts/prepare-release-notes.mjs",
+    "release:checksums": "node scripts/create-release-checksums.mjs",
     "test": "vitest"
   },
   "devDependencies": {

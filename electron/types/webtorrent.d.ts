@@ -28,6 +28,17 @@ declare module "webtorrent" {
     paused?: boolean;
     private?: boolean;
     metadata?: Uint8Array | Buffer | null;
+    announce?: string[];
+    wires?: Array<{
+      isSeeder?: boolean;
+      remoteAddress?: string;
+      remotePort?: number;
+      destroyed?: boolean;
+      downloadSpeed?: () => number;
+      uploadSpeed?: () => number;
+    }>;
+    _queue?: unknown[];
+    _peers?: Map<string, unknown>;
     files: WebTorrentFile[];
     pause(): void;
     resume(): void;

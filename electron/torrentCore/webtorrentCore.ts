@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { promises as fs, watch, type FSWatcher } from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 import WebTorrent, {
@@ -28,7 +29,10 @@ import {
   type TorrentSourceType,
   type TorrentStatus,
   type TorrentSummary,
-  type UpdateTorrentLabelsRequest
+  type SpeedDoctorProbeStatus,
+  type SpeedDoctorRuntimeInput,
+  type UpdateTorrentLabelsRequest,
+  type UpdateTorrentProfileRequest
 } from "./contracts.js";
 import {
   AUTOMATION_CAPABILITIES,
@@ -51,6 +55,10 @@ import {
   toWebTorrentLimit
 } from "./networkSettings.js";
 import { buildWebTorrentAddOptions } from "./profiles.js";
+import {
+  createTorrentSpeedDoctorReport,
+  type SpeedDoctorDiskInput
+} from "./speedDoctor.js";
 
 type PersistedTorrentSource =
   | {
@@ -70,10 +78,12 @@ interface PersistedTorrentRecord {
   category?: string | null;
   tags?: string[];
   filePriorities?: Record<string, TorrentFilePriority>;
+  addedAt?: string;
+  metadataReceivedAt?: string | null;
 }
 
 interface PersistedTorrentState {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   torrents: PersistedTorrentRecord[];
 }
 
@@ -87,6 +97,15 @@ interface TorrentRecord {
   category: string | null;
   tags: string[];
   filePriorities: Record<string, TorrentFilePriority>;
+  addedAt: string;
+  metadataReceivedAt: string | null;
+  lastActivityAt: string | null;
+  lastDownloadedBytes: number;
+  stalledSince: string | null;
+  recentErrors: string[];
+  trackerErrorCount: number;
+  lastTrackerError: string | null;
+  noPeersSources: string[];
   statusOverride?: TorrentStatus;
 }
 
@@ -116,6 +135,7 @@ export class WebTorrentCore extends EventEmitter {
 
     this.progressTimer = setInterval(() => {
       for (const record of this.records.values()) {
+        this.updateRuntimeStats(record);
         this.emitCore("torrent.progress.updated", this.toSummary(record));
       }
     }, 1_000);
@@ -198,7 +218,7 @@ export class WebTorrentCore extends EventEmitter {
     }
 
     if (
-      ![1, 2].includes(persistedState.version) ||
+      ![1, 2, 3].includes(persistedState.version) ||
       !Array.isArray(persistedState.torrents)
     ) {
       return;
@@ -291,6 +311,23 @@ export class WebTorrentCore extends EventEmitter {
     });
 
     this.emitCore("diagnostics.speed.checked", { report });
+    return report;
+  }
+
+  async runSpeedDoctor(id: string) {
+    const record = this.getRecord(id);
+    this.updateRuntimeStats(record);
+    const torrent = this.toSummary(record);
+    const disk = await getDiskSpace(torrent.savePath || record.downloadPath);
+    const report = createTorrentSpeedDoctorReport({
+      torrent,
+      network: this.getNetworkSettingsState(),
+      automation: this.getAutomationSettingsState(),
+      disk,
+      runtime: await this.createSpeedDoctorRuntime(record)
+    });
+
+    this.emitCore("diagnostics.torrent_speed.checked", { report });
     return report;
   }
 
@@ -411,6 +448,22 @@ export class WebTorrentCore extends EventEmitter {
     return summary;
   }
 
+  updateProfile(request: UpdateTorrentProfileRequest) {
+    const record = this.getRecord(request.id);
+    record.profileId = request.profileId;
+    applyProfileHintsToRecord(record);
+
+    const summary = this.toSummary(record);
+    this.emitCore("assistant.profile.applied", {
+      id: summary.id,
+      profileId: record.profileId,
+      appliedOptions: [`profile:${record.profileId}`, "existing_torrent:metadata"]
+    });
+    this.emitCore("torrent.files.updated", summary);
+    void this.persistState();
+    return summary;
+  }
+
   setFilePriority(request: SetTorrentFilePriorityRequest) {
     const record = this.getRecord(request.id);
     const file = record.torrent.files[request.fileIndex];
@@ -469,6 +522,7 @@ export class WebTorrentCore extends EventEmitter {
       let resolved = false;
       const temporaryId = randomUUID();
       const torrent = this.client.add(input, webTorrentOptions);
+      const now = new Date().toISOString();
       const record: TorrentRecord = {
         id: temporaryId,
         source,
@@ -479,6 +533,15 @@ export class WebTorrentCore extends EventEmitter {
         category: normalizeTorrentCategory(request.category),
         tags: normalizeTorrentTags(request.tags),
         filePriorities,
+        addedAt: now,
+        metadataReceivedAt: null,
+        lastActivityAt: null,
+        lastDownloadedBytes: 0,
+        stalledSince: null,
+        recentErrors: [],
+        trackerErrorCount: 0,
+        lastTrackerError: null,
+        noPeersSources: [],
         statusOverride: request.startPaused ? "paused" : undefined
       };
 
@@ -530,6 +593,8 @@ export class WebTorrentCore extends EventEmitter {
     const { torrent } = record;
 
     torrent.on("metadata", () => {
+      record.metadataReceivedAt = new Date().toISOString();
+      record.lastActivityAt = record.metadataReceivedAt;
       this.promoteRecordId(record);
       this.applyFilePriorities(record);
       this.emitCore("torrent.metadata.received", this.toSummary(record));
@@ -540,11 +605,13 @@ export class WebTorrentCore extends EventEmitter {
     torrent.on("ready", () => {
       this.promoteRecordId(record);
       this.applyFilePriorities(record);
+      record.lastActivityAt = new Date().toISOString();
       this.emitStatus(record);
     });
 
     torrent.on("done", () => {
       record.statusOverride = "completed";
+      record.lastActivityAt = new Date().toISOString();
       this.emitCore("torrent.completed", this.toSummary(record));
       this.emitStatus(record);
       void this.persistState();
@@ -552,11 +619,38 @@ export class WebTorrentCore extends EventEmitter {
 
     torrent.on("error", (error: Error) => {
       record.statusOverride = "error";
+      this.recordRuntimeError(record, error.message);
       this.emitCore("torrent.error", {
         id: record.id,
         message: error.message
       });
       this.emitStatus(record);
+    });
+
+    torrent.on("warning", (error: Error) => {
+      this.recordRuntimeError(record, error.message);
+      if (isTrackerRelatedMessage(error.message)) {
+        record.trackerErrorCount += 1;
+        record.lastTrackerError = redactDiagnosticText(error.message);
+      }
+    });
+
+    torrent.on("trackerAnnounce", () => {
+      record.lastActivityAt = new Date().toISOString();
+    });
+
+    torrent.on("noPeers", (source: string) => {
+      record.noPeersSources = Array.from(
+        new Set([...record.noPeersSources, source].filter(Boolean))
+      ).slice(-4);
+    });
+
+    torrent.on("peer", () => {
+      record.lastActivityAt = new Date().toISOString();
+    });
+
+    torrent.on("wire", () => {
+      record.lastActivityAt = new Date().toISOString();
     });
   }
 
@@ -574,6 +668,7 @@ export class WebTorrentCore extends EventEmitter {
     const { torrent } = record;
     const metadataReady = Boolean(torrent.metadata || torrent.ready);
     const timeRemaining = Number(torrent.timeRemaining);
+    const connectedSeeds = countConnectedSeeds(torrent);
 
     return {
       id: record.id,
@@ -585,8 +680,8 @@ export class WebTorrentCore extends EventEmitter {
       downloadedBytes: toNonNegativeNumber(torrent.downloaded),
       downloadSpeedBytes: toNonNegativeNumber(torrent.downloadSpeed),
       uploadSpeedBytes: toNonNegativeNumber(torrent.uploadSpeed),
-      seeds: 0,
-      peers: torrent.numPeers ?? 0,
+      seeds: connectedSeeds,
+      peers: torrent.numPeers ?? torrent.wires?.length ?? 0,
       etaSeconds: Number.isFinite(timeRemaining)
         ? Math.max(0, Math.ceil(timeRemaining / 1_000))
         : null,
@@ -605,7 +700,13 @@ export class WebTorrentCore extends EventEmitter {
           record.filePriorities,
           getSourceDisplayName(record.source)
         )
-      )
+      ),
+      addedAt: record.addedAt,
+      metadataReceivedAt: record.metadataReceivedAt,
+      lastActivityAt: record.lastActivityAt,
+      lastError: record.recentErrors[record.recentErrors.length - 1] ?? null,
+      trackerHosts: getTrackerHosts(torrent),
+      connectedSeeds
     };
   }
 
@@ -623,7 +724,9 @@ export class WebTorrentCore extends EventEmitter {
     }
 
     if (record.torrent.done) {
-      return "completed";
+      return toNonNegativeNumber(record.torrent.uploadSpeed) > 0
+        ? "seeding"
+        : "completed";
     }
 
     return "downloading";
@@ -642,6 +745,72 @@ export class WebTorrentCore extends EventEmitter {
     for (const file of record.torrent.files) {
       applyFilePriority(file, record.filePriorities[file.path] ?? "normal");
     }
+  }
+
+  private updateRuntimeStats(record: TorrentRecord) {
+    const downloadedBytes = toNonNegativeNumber(record.torrent.downloaded);
+    const downloadSpeedBytes = toNonNegativeNumber(record.torrent.downloadSpeed);
+    const peerCount = record.torrent.numPeers ?? record.torrent.wires?.length ?? 0;
+    const now = new Date().toISOString();
+
+    if (
+      downloadedBytes > record.lastDownloadedBytes ||
+      downloadSpeedBytes > 0 ||
+      peerCount > 0
+    ) {
+      record.lastActivityAt = now;
+    }
+
+    if (downloadedBytes > record.lastDownloadedBytes || downloadSpeedBytes > 0) {
+      record.lastDownloadedBytes = downloadedBytes;
+      record.stalledSince = null;
+      return;
+    }
+
+    if (
+      this.getStatus(record) === "downloading" &&
+      Boolean(record.torrent.metadata || record.torrent.ready) &&
+      peerCount > 0 &&
+      downloadSpeedBytes === 0
+    ) {
+      record.stalledSince ??= now;
+      return;
+    }
+
+    record.stalledSince = null;
+  }
+
+  private recordRuntimeError(record: TorrentRecord, message: string) {
+    const redacted = redactDiagnosticText(message);
+    record.recentErrors = [...record.recentErrors, redacted].slice(-8);
+  }
+
+  private async createSpeedDoctorRuntime(
+    record: TorrentRecord
+  ): Promise<SpeedDoctorRuntimeInput> {
+    const snapshot = this.getSnapshot();
+    const activeSettings = this.getNetworkSettingsState().activeSettings;
+    const configuredProxy = this.networkSettings.proxy;
+
+    return {
+      activeTorrentCount: snapshot.torrents.filter(
+        (item) => item.status === "downloading" || item.status === "seeding"
+      ).length,
+      activeDownloadCount: snapshot.torrents.filter(
+        (item) => item.status === "downloading"
+      ).length,
+      connectedSeeds: countConnectedSeeds(record.torrent),
+      queuedPeerCount: record.torrent._queue?.length ?? 0,
+      trackerHosts: getTrackerHosts(record.torrent),
+      trackerErrorCount: record.trackerErrorCount,
+      lastTrackerError: record.lastTrackerError,
+      noPeersSources: [...record.noPeersSources],
+      recentErrors: [...record.recentErrors],
+      stalledSeconds: getElapsedSeconds(record.stalledSince),
+      lockedFileCount: await getLockedFileCount(record),
+      incomingPortProbe: await probeIncomingPort(activeSettings.incomingPort),
+      proxyProbe: await probeProxy(configuredProxy)
+    };
   }
 
   private createClient(settings: NetworkSettings) {
@@ -885,7 +1054,7 @@ export class WebTorrentCore extends EventEmitter {
 
   private async persistState() {
     const state: PersistedTorrentState = {
-      version: 2,
+      version: 3,
       torrents: [...this.records.values()].map((record) => ({
         source: record.source,
         downloadPath: record.downloadPath,
@@ -893,7 +1062,9 @@ export class WebTorrentCore extends EventEmitter {
         paused: record.manualPaused || record.torrent.paused === true,
         category: record.category,
         tags: [...record.tags],
-        filePriorities: { ...record.filePriorities }
+        filePriorities: { ...record.filePriorities },
+        addedAt: record.addedAt,
+        metadataReceivedAt: record.metadataReceivedAt
       }))
     };
 
@@ -1010,6 +1181,200 @@ function applyFilePriority(
   file.select(priority === "high" ? 10 : undefined);
 }
 
+function applyProfileHintsToRecord(record: TorrentRecord) {
+  if (record.profileId !== "stream_while_downloading") {
+    return;
+  }
+
+  const mediaFile = record.torrent.files.find((file) =>
+    isMediaFile(file.path || file.name)
+  );
+
+  if (!mediaFile) {
+    return;
+  }
+
+  record.filePriorities[mediaFile.path] = "high";
+  applyFilePriority(mediaFile, "high");
+}
+
+function countConnectedSeeds(torrent: WebTorrentTorrent) {
+  return (torrent.wires ?? []).filter((wire) => wire.isSeeder).length;
+}
+
+function getTrackerHosts(torrent: WebTorrentTorrent) {
+  return Array.from(
+    new Set(
+      (torrent.announce ?? [])
+        .map((announce) => getUrlHost(announce))
+        .filter((host): host is string => Boolean(host))
+    )
+  ).slice(0, 12);
+}
+
+function getUrlHost(value: string) {
+  try {
+    return new URL(value).host;
+  } catch {
+    return null;
+  }
+}
+
+function isMediaFile(value: string) {
+  return [
+    ".avi",
+    ".flac",
+    ".m4a",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".ogg",
+    ".wav",
+    ".webm"
+  ].some((extension) => value.toLowerCase().endsWith(extension));
+}
+
+function getElapsedSeconds(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const elapsed = Date.now() - Date.parse(value);
+  return Number.isFinite(elapsed) && elapsed > 0
+    ? Math.floor(elapsed / 1_000)
+    : null;
+}
+
+async function getLockedFileCount(record: TorrentRecord) {
+  let lockedFileCount = 0;
+
+  for (const file of record.torrent.files.slice(0, 8)) {
+    const priority = record.filePriorities[file.path] ?? "normal";
+
+    if (priority === "skip") {
+      continue;
+    }
+
+    const filePath = path.join(record.torrent.path || record.downloadPath, file.path);
+
+    try {
+      const handle = await fs.open(filePath, "r+");
+      await handle.close();
+    } catch (error) {
+      if (!isNodeError(error) || error.code === "ENOENT") {
+        continue;
+      }
+
+      if (["EACCES", "EPERM", "EBUSY"].includes(error.code ?? "")) {
+        lockedFileCount += 1;
+      }
+    }
+  }
+
+  return lockedFileCount;
+}
+
+async function probeIncomingPort(
+  incomingPort: number | null
+): Promise<SpeedDoctorProbeStatus> {
+  if (incomingPort === null) {
+    return "unknown";
+  }
+
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    const done = (status: SpeedDoctorProbeStatus) => {
+      server.removeAllListeners();
+      if (server.listening) {
+        server.close(() => resolve(status));
+        return;
+      }
+      resolve(status);
+    };
+
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      done(error.code === "EADDRINUSE" ? "ok" : "failed");
+    });
+    server.once("listening", () => done("failed"));
+    server.listen(incomingPort, "0.0.0.0");
+  });
+}
+
+async function probeProxy(
+  proxy: NetworkSettings["proxy"]
+): Promise<SpeedDoctorProbeStatus> {
+  if (proxy.type === "none") {
+    return "unknown";
+  }
+
+  if (!proxy.host || proxy.port === null) {
+    return "failed";
+  }
+
+  return probeTcp(proxy.host, proxy.port, 2_000);
+}
+
+async function probeTcp(
+  host: string,
+  port: number,
+  timeoutMs: number
+): Promise<SpeedDoctorProbeStatus> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port });
+    const finish = (status: SpeedDoctorProbeStatus) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(status);
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finish("ok"));
+    socket.once("timeout", () => finish("failed"));
+    socket.once("error", () => finish("failed"));
+  });
+}
+
+async function getDiskSpace(
+  pathValue: string
+): Promise<SpeedDoctorDiskInput | null> {
+  try {
+    const existingPath = await findExistingPath(pathValue);
+    const stats = await fs.statfs(existingPath);
+
+    return {
+      availableBytes: stats.bavail * stats.bsize,
+      totalBytes: stats.blocks * stats.bsize
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function findExistingPath(pathValue: string) {
+  let currentPath = path.resolve(pathValue);
+  const rootPath = path.parse(currentPath).root;
+
+  while (true) {
+    try {
+      const stats = await fs.stat(currentPath);
+      return stats.isDirectory() ? currentPath : path.dirname(currentPath);
+    } catch (error) {
+      if (
+        isNodeError(error) &&
+        error.code === "ENOENT" &&
+        currentPath !== rootPath
+      ) {
+        currentPath = path.dirname(currentPath);
+        continue;
+      }
+
+      throw error;
+    }
+  }
+}
+
 function getNetworkInterfaces(): NetworkInterfaceInfo[] {
   return Object.entries(os.networkInterfaces()).flatMap(([name, addresses]) =>
     (addresses ?? []).map((address) => ({
@@ -1024,6 +1389,30 @@ function getNetworkInterfaces(): NetworkInterfaceInfo[] {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isTrackerRelatedMessage(message: string) {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("tracker") ||
+    normalized.includes("announce") ||
+    normalized.includes("scrape")
+  );
+}
+
+function redactDiagnosticText(value: string) {
+  return value
+    .replace(/https?:\/\/[^\s)]+/gi, (match) => {
+      try {
+        const url = new URL(match);
+        return `${url.protocol}//${url.host}${url.pathname}`;
+      } catch {
+        return "[url]";
+      }
+    })
+    .replace(/[A-Za-z]:\\[^\s)]+/g, "[path]")
+    .replace(/passkey=[^&\s]+/gi, "passkey=[redacted]")
+    .slice(0, 240);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

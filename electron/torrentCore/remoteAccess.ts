@@ -20,8 +20,10 @@ import {
   type SpeedLimitSettings,
   type TorrentCoreSnapshot,
   type TorrentCoreResult,
+  type TorrentSpeedDoctorReport,
   type TorrentSummary,
   type UpdateTorrentLabelsRequest,
+  type UpdateTorrentProfileRequest,
   type WatchFolderScanResult
 } from "./contracts.js";
 
@@ -70,7 +72,9 @@ export interface RemoteAccessCore {
   remove(id: string): Promise<TorrentCoreSnapshot>;
   recheck(id: string): Promise<TorrentSummary>;
   updateLabels(request: UpdateTorrentLabelsRequest): TorrentSummary;
+  updateProfile(request: UpdateTorrentProfileRequest): TorrentSummary;
   setFilePriority(request: SetTorrentFilePriorityRequest): TorrentSummary;
+  runSpeedDoctor(id: string): Promise<TorrentSpeedDoctorReport>;
   getSnapshot(): TorrentCoreSnapshot;
   getNetworkSettingsState(): NetworkSettingsState;
   updateNetworkSettings(settings: NetworkSettings): Promise<NetworkSettingsState>;
@@ -308,12 +312,46 @@ export class RemoteAccessServer {
       }
 
       const torrentActionMatch = route.match(
-        /^torrents\/([^/]+)\/(pause|resume|recheck)$/
+        /^torrents\/([^/]+)\/(pause|resume|recheck|speed-doctor)$/
       );
 
-      if (request.method === "POST" && torrentActionMatch) {
+      if (
+        (request.method === "POST" || request.method === "GET") &&
+        torrentActionMatch
+      ) {
         const id = decodeURIComponent(torrentActionMatch[1]);
         const action = torrentActionMatch[2];
+
+        if (action === "speed-doctor") {
+          if (request.method !== "GET") {
+            sendJson(response, 405, {
+              ok: false,
+              error: {
+                code: "method_not_allowed",
+                message: "Speed Doctor reports use GET."
+              }
+            });
+            return;
+          }
+
+          sendJson(
+            response,
+            200,
+            await toResult(() => this.options.core.runSpeedDoctor(id))
+          );
+          return;
+        }
+
+        if (request.method !== "POST") {
+          sendJson(response, 405, {
+            ok: false,
+            error: {
+              code: "method_not_allowed",
+              message: "Torrent actions use POST."
+            }
+          });
+          return;
+        }
 
         if (action === "pause") {
           sendJson(response, 200, await toResult(() => this.options.core.pause(id)));
@@ -357,6 +395,26 @@ export class RemoteAccessServer {
           200,
           await toResult(() =>
             this.options.core.updateLabels({
+              id,
+              ...body
+            })
+          )
+        );
+        return;
+      }
+
+      const torrentProfileMatch = route.match(/^torrents\/([^/]+)\/profile$/);
+
+      if (request.method === "PATCH" && torrentProfileMatch) {
+        const body = await readJsonBody<Omit<UpdateTorrentProfileRequest, "id">>(
+          request
+        );
+        const id = decodeURIComponent(torrentProfileMatch[1]);
+        sendJson(
+          response,
+          200,
+          await toResult(() =>
+            this.options.core.updateProfile({
               id,
               ...body
             })
@@ -812,8 +870,10 @@ function createApiDocs(origin: string | null) {
       "POST /api/torrents/{id}/pause",
       "POST /api/torrents/{id}/resume",
       "POST /api/torrents/{id}/recheck",
+      "GET /api/torrents/{id}/speed-doctor",
       "DELETE /api/torrents/{id}",
       "PATCH /api/torrents/{id}/labels",
+      "PATCH /api/torrents/{id}/profile",
       "PATCH /api/torrents/{id}/files/{fileIndex}",
       "GET /api/network-settings",
       "PUT /api/network-settings",

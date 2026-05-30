@@ -5,7 +5,7 @@ import {
 
 export function createSpeedDoctorBaseline(): SpeedDoctorBaseline {
   return {
-    status: "ready_for_future_diagnostics",
+    status: "diagnostics_v1",
     supportedActions: [...SPEED_DOCTOR_ACTION_IDS],
     requiresConfirmationForMutations: true
   };
