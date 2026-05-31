@@ -1,12 +1,18 @@
 import { BrowserWindow, dialog, ipcMain } from "electron";
+import { ASSISTANT_EVENT_CHANNEL, isAssistantEvent } from "../assistantEvents.js";
 import {
+  ASSISTANT_IPC_CHANNELS,
   TORRENT_CORE_EVENT_CHANNEL,
   TORRENT_IPC_CHANNELS,
   type AddMagnetRequest,
   type AddTorrentFileRequest,
+  type AssistantProfileApplyRequest,
+  type AssistantWarningDismissRequest,
   type AutomationSettings,
   type NetworkSettings,
+  type RunSpeedDoctorRequest,
   type SetTorrentFilePriorityRequest,
+  type SpeedDoctorScanMode,
   type TorrentCoreEvent,
   type TorrentCoreResult,
   type UpdateTorrentProfileRequest,
@@ -18,6 +24,10 @@ export function registerTorrentCoreIpc(core: WebTorrentCore) {
   core.on("core-event", (event: TorrentCoreEvent) => {
     for (const window of BrowserWindow.getAllWindows()) {
       window.webContents.send(TORRENT_CORE_EVENT_CHANNEL, event);
+
+      if (isAssistantEvent(event)) {
+        window.webContents.send(ASSISTANT_EVENT_CHANNEL, event);
+      }
     }
   });
 
@@ -102,8 +112,24 @@ export function registerTorrentCoreIpc(core: WebTorrentCore) {
     toResult(() => core.runNetworkDiagnostics())
   );
 
-  ipcMain.handle(TORRENT_IPC_CHANNELS.runSpeedDoctor, async (_event, id: string) =>
-    toResult(() => core.runSpeedDoctor(id))
+  ipcMain.handle(TORRENT_IPC_CHANNELS.runSpeedDoctor, async (_event, request: string | RunSpeedDoctorRequest) =>
+    toResult(() => {
+      const normalized = normalizeRunSpeedDoctorRequest(request);
+      return core.runSpeedDoctor(normalized.id, normalized.mode);
+    })
+  );
+
+  ipcMain.handle(TORRENT_IPC_CHANNELS.getSpeedDoctorHistory, async () =>
+    toResult(() => core.getSpeedDoctorHistory())
+  );
+
+  ipcMain.handle(
+    TORRENT_IPC_CHANNELS.exportSpeedDoctorReport,
+    async (_event, id: string) => toResult(() => core.exportSpeedDoctorReport(id))
+  );
+
+  ipcMain.handle(TORRENT_IPC_CHANNELS.mapIncomingPort, async () =>
+    toResult(() => core.mapIncomingPort())
   );
 
   ipcMain.handle(TORRENT_IPC_CHANNELS.getAutomationSettings, async () =>
@@ -118,6 +144,28 @@ export function registerTorrentCoreIpc(core: WebTorrentCore) {
 
   ipcMain.handle(TORRENT_IPC_CHANNELS.runWatchFolderScan, async () =>
     toResult(() => core.runWatchFolderScan())
+  );
+
+  ipcMain.handle(ASSISTANT_IPC_CHANNELS.getState, async () =>
+    toResult(() => core.getAssistantState())
+  );
+
+  ipcMain.handle(
+    ASSISTANT_IPC_CHANNELS.profileApply,
+    async (_event, request: AssistantProfileApplyRequest) =>
+      toResult(() => core.applyAssistantProfile(request))
+  );
+
+  ipcMain.handle(
+    ASSISTANT_IPC_CHANNELS.warningDismiss,
+    async (_event, request: AssistantWarningDismissRequest) =>
+      toResult(() => core.dismissAssistantWarning(request))
+  );
+
+  ipcMain.handle(
+    ASSISTANT_IPC_CHANNELS.scheduleRequest,
+    async (_event, torrentId: string) =>
+      toResult(() => core.getAssistantScheduleSuggestion(torrentId))
   );
 }
 
@@ -144,6 +192,23 @@ function createCodedError(code: string, message: string) {
   const error = new Error(message);
   (error as Error & { code: string }).code = code;
   return error;
+}
+
+function normalizeRunSpeedDoctorRequest(
+  request: string | RunSpeedDoctorRequest
+): Required<RunSpeedDoctorRequest> {
+  if (typeof request === "string") {
+    return { id: request, mode: "full" };
+  }
+
+  return {
+    id: request.id,
+    mode: normalizeScanMode(request.mode)
+  };
+}
+
+function normalizeScanMode(mode: SpeedDoctorScanMode | undefined): SpeedDoctorScanMode {
+  return mode === "quick" ? "quick" : "full";
 }
 
 function getErrorCode(error: unknown) {

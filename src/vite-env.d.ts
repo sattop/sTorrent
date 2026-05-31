@@ -1,8 +1,24 @@
 /// <reference types="vite/client" />
 
 import type {
+  AIAdviceRequest,
+  AIAdviceResult,
+  AIEvent,
+  AIProviderConfig,
+  AIResult,
+  AISettings,
+  AISettingsState,
+  ProviderTestResult
+} from "../electron/aiContracts";
+import type { AssistantEvent } from "../electron/assistantEvents";
+import type { AppUpdateEvent, AppUpdateState } from "../electron/appUpdateContracts";
+import type {
   AddMagnetRequest,
   AddTorrentFileRequest,
+  AssistantProfileApplyRequest,
+  AssistantScheduleSuggestion,
+  AssistantState,
+  AssistantWarningDismissRequest,
   AutomationSettings,
   AutomationSettingsState,
   NetworkDiagnosticsReport,
@@ -11,6 +27,10 @@ import type {
   RemoteAccessSettings,
   RemoteAccessSettingsState,
   SetTorrentFilePriorityRequest,
+  SpeedDoctorHistorySummary,
+  SpeedDoctorPortCheckResult,
+  SpeedDoctorReportExport,
+  SpeedDoctorScanMode,
   TorrentCoreEvent,
   TorrentCoreResult,
   TorrentCoreSnapshot,
@@ -55,8 +75,16 @@ declare global {
           TorrentCoreResult<NetworkDiagnosticsReport>
         >;
         runSpeedDoctor(
-          id: string
+          id: string,
+          options?: { mode?: SpeedDoctorScanMode }
         ): Promise<TorrentCoreResult<TorrentSpeedDoctorReport>>;
+        getSpeedDoctorHistory(): Promise<
+          TorrentCoreResult<SpeedDoctorHistorySummary>
+        >;
+        exportSpeedDoctorReport(
+          id: string
+        ): Promise<TorrentCoreResult<SpeedDoctorReportExport>>;
+        mapIncomingPort(): Promise<TorrentCoreResult<SpeedDoctorPortCheckResult>>;
         getAutomationSettings(): Promise<
           TorrentCoreResult<AutomationSettingsState>
         >;
@@ -71,6 +99,38 @@ declare global {
         updateSettings(
           request: RemoteAccessSettings
         ): Promise<TorrentCoreResult<RemoteAccessSettingsState>>;
+      };
+      assistant: {
+        getState(): Promise<TorrentCoreResult<AssistantState>>;
+        applyProfile(
+          request: AssistantProfileApplyRequest
+        ): Promise<TorrentCoreResult<TorrentSummary>>;
+        dismissWarning(
+          request: AssistantWarningDismissRequest
+        ): Promise<TorrentCoreResult<AssistantState>>;
+        getScheduleSuggestion(
+          torrentId: string
+        ): Promise<TorrentCoreResult<AssistantScheduleSuggestion | null>>;
+        onEvent(listener: (event: AssistantEvent) => void): () => void;
+      };
+      ai: {
+        getSettings(): Promise<AIResult<AISettingsState>>;
+        updateSettings(request: AISettings): Promise<AIResult<AISettingsState>>;
+        testProvider(
+          request: AIProviderConfig
+        ): Promise<AIResult<ProviderTestResult>>;
+        listModels(request: AIProviderConfig): Promise<AIResult<string[]>>;
+        requestAdvice(
+          request: AIAdviceRequest
+        ): Promise<AIResult<AIAdviceResult>>;
+        onEvent(listener: (event: AIEvent) => void): () => void;
+      };
+      updates: {
+        getState(): Promise<AppUpdateState>;
+        checkForUpdates(): Promise<AppUpdateState>;
+        downloadUpdate(): Promise<AppUpdateState>;
+        installUpdate(): Promise<AppUpdateState>;
+        onEvent(listener: (event: AppUpdateEvent) => void): () => void;
       };
     };
   }

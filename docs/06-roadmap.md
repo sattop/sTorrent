@@ -88,7 +88,7 @@
 
 Задачи:
 
-- `.exe` установщик для Windows: `sTorent Setup.exe`;
+- `.exe` установщик для Windows: `sTorent-Setup.exe`;
 - GitHub Actions для автоматической сборки Windows `.exe`;
 - автоматическая публикация `.exe` в GitHub Release при создании тега;
 - checksum-файл для релизных сборок;

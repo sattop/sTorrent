@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const rootDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const releaseDir = path.join(rootDir, "release");
-const installerName = "sTorent Setup.exe";
+const installerName = "sTorent-Setup.exe";
 const installerPath = path.join(releaseDir, installerName);
 const checksumPath = path.join(releaseDir, "SHA256SUMS.txt");
 const blockedReleasePatterns = [

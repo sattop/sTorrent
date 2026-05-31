@@ -1,6 +1,6 @@
 {
   "name": "storent",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A modern desktop BitTorrent client with Smart Download Assistant and Speed Doctor.",
   "author": "sTorent contributors",
   "license": "MIT",
@@ -22,6 +22,8 @@
     "audit:security": "node scripts/audit-security.mjs",
     "release:notes": "node scripts/prepare-release-notes.mjs",
     "release:checksums": "node scripts/create-release-checksums.mjs",
+    "release:verify-signatures": "node scripts/verify-windows-signatures.mjs",
+    "build:windows:signed": "node scripts/build-signed-windows.mjs",
     "test": "vitest"
   },
   "devDependencies": {
@@ -65,11 +67,25 @@
     "directories": {
       "output": "release"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "sattop",
+        "repo": "sTorrent",
+        "releaseType": "release"
+      }
+    ],
     "win": {
       "icon": "assets/icon.ico",
       "executableName": "sTorent",
       "requestedExecutionLevel": "asInvoker",
       "signAndEditExecutable": false,
+      "signtoolOptions": {
+        "signingHashAlgorithms": [
+          "sha256"
+        ],
+        "rfc3161TimeStampServer": "http://timestamp.digicert.com"
+      },
       "target": [
         {
           "target": "nsis",
@@ -78,7 +94,7 @@
           ]
         }
       ],
-      "artifactName": "sTorent Setup.${ext}"
+      "artifactName": "sTorent-Setup.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -96,6 +112,7 @@
     }
   },
   "dependencies": {
+    "electron-updater": "^6.8.3",
     "webtorrent": "^3.0.6"
   }
 }

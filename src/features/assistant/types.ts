@@ -12,6 +12,8 @@ export type DownloadProfileId = (typeof DOWNLOAD_PROFILE_IDS)[number];
 
 export type AssistantStatus = "rules_v1";
 
+export type TorrentHealthStatus = "good" | "normal" | "weak" | "critical";
+
 export type SmartAssistantReasonCode =
   | "manual_profile_selected"
   | "private_mode_enabled"
@@ -38,7 +40,11 @@ export type SmartAssistantWarningCode =
   | "disk_space_low"
   | "file_conflict"
   | "low_peer_availability"
-  | "metadata_pending";
+  | "metadata_pending"
+  | "no_seeders"
+  | "private_no_tracker"
+  | "old_torrent"
+  | "optional_files_deprioritized";
 
 export type SmartAssistantSuggestionType =
   | "folder"
@@ -98,12 +104,17 @@ export interface SmartAssistantInput {
   privateTorrent?: boolean;
   seeds?: number;
   peers?: number;
+  trackerCount?: number;
+  hasWebSeeds?: boolean;
+  creationDateSeconds?: number | null;
   sourceType?: "torrent_file" | "magnet";
 }
 
 export interface SmartAssistantRecommendation {
   profileId: DownloadProfileId;
   confidence: number;
+  healthScore: number;
+  healthStatus: TorrentHealthStatus;
   reasons: SmartAssistantReasonCode[];
   warnings: SmartAssistantWarningCode[];
   suggestions: SmartAssistantSuggestion[];

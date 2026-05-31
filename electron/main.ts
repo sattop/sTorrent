@@ -1,6 +1,9 @@
 import { app, BrowserWindow, shell } from "electron";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { registerAIIpc } from "./aiIpc.js";
+import { AIService } from "./aiService.js";
+import { AppUpdateManager } from "./appUpdates.js";
 import { registerTorrentCoreIpc } from "./torrentCore/ipc.js";
 import { RemoteAccessServer } from "./torrentCore/remoteAccess.js";
 import { registerRemoteAccessIpc } from "./torrentCore/remoteAccessIpc.js";
@@ -10,6 +13,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 let torrentCore: WebTorrentCore | null = null;
 let remoteAccess: RemoteAccessServer | null = null;
+let aiService: AIService | null = null;
+const appUpdates = new AppUpdateManager();
 
 function getWindowIconPath() {
   if (app.isPackaged) {
@@ -36,6 +41,7 @@ function createMainWindow() {
       sandbox: true
     }
   });
+  appUpdates.setMainWindow(window);
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
@@ -55,6 +61,8 @@ if (process.platform === "win32") {
   app.setAppUserModelId("app.storent.desktop");
 }
 
+appUpdates.registerIpc();
+
 app.whenReady().then(async () => {
   torrentCore = new WebTorrentCore({
     defaultDownloadPath: app.getPath("downloads"),
@@ -66,9 +74,32 @@ app.whenReady().then(async () => {
     automationSettingsFilePath: path.join(
       app.getPath("userData"),
       "automation-settings.json"
+    ),
+    speedHistoryFilePath: path.join(
+      app.getPath("userData"),
+      "speed_history.db"
+    ),
+    assistantProfileUsageFilePath: path.join(
+      app.getPath("userData"),
+      "assistant",
+      "profile_usage.json"
+    ),
+    assistantWarningDismissedFilePath: path.join(
+      app.getPath("userData"),
+      "assistant",
+      "warning_dismissed.json"
+    ),
+    speedDoctorReportDirectoryPath: path.join(
+      app.getPath("userData"),
+      "diagnostic_reports"
     )
   });
+  aiService = new AIService({
+    settingsFilePath: path.join(app.getPath("userData"), "ai-settings.json"),
+    keysFilePath: path.join(app.getPath("userData"), "ai-keys.json")
+  });
   registerTorrentCoreIpc(torrentCore);
+  registerAIIpc(aiService);
   remoteAccess = new RemoteAccessServer({
     core: torrentCore,
     settingsFilePath: path.join(app.getPath("userData"), "remote-access.json"),
@@ -77,10 +108,14 @@ app.whenReady().then(async () => {
   registerRemoteAccessIpc(remoteAccess);
   await torrentCore.restoreNetworkSettings();
   await torrentCore.restoreAutomationSettings();
+  await torrentCore.restoreSpeedHistory();
+  await torrentCore.restoreAssistantState();
+  await aiService.restore();
   await torrentCore.restore();
   await remoteAccess.restore();
 
   createMainWindow();
+  appUpdates.scheduleStartupCheck();
   void torrentCore.runWatchFolderScan();
 
   app.on("activate", () => {

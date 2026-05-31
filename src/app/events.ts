@@ -7,6 +7,8 @@ export const CORE_EVENTS = [
   "torrent.labels.updated",
   "torrent.files.updated",
   "torrent.error",
+  "assistant.health.computed",
+  "assistant.schedule.suggestion",
   "network.port.checked",
   "assistant.profile.suggested",
   "assistant.profile.applied",
@@ -15,6 +17,10 @@ export const CORE_EVENTS = [
   "automation.watch.scan.completed",
   "diagnostics.speed.checked",
   "diagnostics.torrent_speed.checked",
+  "speedDoctor.status.updated",
+  "speedDoctor.anomaly.detected",
+  "speedDoctor.diagnosis.ready",
+  "speedDoctor.report.ready",
   "settings.changed"
 ] as const;
 

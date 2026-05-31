@@ -409,10 +409,31 @@ button:disabled {
   color: #92400e;
 }
 
+.warning-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .assistant-suggestions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.assistant-schedule {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #d7deea;
+  border-radius: 8px;
+  color: #344054;
+  background: #f8fafc;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .assistant-suggestion-pill {
@@ -722,6 +743,113 @@ button:disabled {
   gap: 8px;
 }
 
+.doctor-snapshot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #475467;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.doctor-snapshot span,
+.doctor-warning {
+  padding: 6px 8px;
+  border: 1px solid #d7deea;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.doctor-warning {
+  margin: 0;
+  color: #92400e;
+  background: #fffaeb;
+  border-color: #fedf89;
+}
+
+.speed-history-chart {
+  display: grid;
+  gap: 6px;
+}
+
+.speed-history-bars {
+  display: grid;
+  grid-template-columns: repeat(24, minmax(3px, 1fr));
+  align-items: end;
+  min-height: 52px;
+  gap: 3px;
+  padding: 8px;
+  border: 1px solid #e7edf6;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.speed-history-bars span {
+  display: block;
+  min-height: 4px;
+  border-radius: 999px 999px 2px 2px;
+  background: #2563eb;
+}
+
+.speed-history-meta {
+  display: flex;
+  justify-content: space-between;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.doctor-anomalies,
+.doctor-diagnoses {
+  display: grid;
+  gap: 8px;
+}
+
+.doctor-anomalies strong,
+.doctor-diagnoses > strong {
+  color: #101828;
+  font-size: 13px;
+}
+
+.doctor-anomalies ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: #475467;
+  font-size: 12px;
+}
+
+.doctor-diagnoses article {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid #e7edf6;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.doctor-diagnoses article.high {
+  border-color: #fecaca;
+  background: #fff1f2;
+}
+
+.doctor-diagnoses article.medium {
+  border-color: #fedf89;
+  background: #fffaeb;
+}
+
+.doctor-diagnoses b {
+  color: #101828;
+  font-size: 13px;
+}
+
+.doctor-diagnoses span {
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .doctor-details summary {
   cursor: pointer;
   color: #475467;
@@ -757,6 +885,25 @@ button:disabled {
 .network-settings {
   display: grid;
   gap: 14px;
+}
+
+.app-update-settings {
+  display: grid;
+  gap: 14px;
+}
+
+.ai-settings {
+  display: grid;
+  gap: 14px;
+  padding-top: 18px;
+  border-top: 1px solid #e7edf6;
+}
+
+.app-update-settings + .ai-settings,
+.app-update-settings + .network-settings,
+.ai-settings + .network-settings {
+  padding-top: 18px;
+  border-top: 1px solid #e7edf6;
 }
 
 .remote-access-settings {
@@ -818,6 +965,66 @@ button:disabled {
   font-size: 12px;
 }
 
+.health-summary {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: #475467;
+  background: #f8fafc;
+  font-size: 13px;
+}
+
+.health-summary.good {
+  color: #166534;
+  background: #f0fdf4;
+}
+
+.health-summary.normal {
+  color: #854d0e;
+  background: #fefce8;
+}
+
+.health-summary.weak {
+  color: #9a3412;
+  background: #fff7ed;
+}
+
+.health-summary.critical {
+  color: #b42318;
+  background: #fff1f2;
+}
+
+.ai-advice-bubble {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+}
+
+.ai-advice-bubble strong {
+  color: #1d4ed8;
+  font-size: 13px;
+}
+
+.ai-advice-bubble p {
+  margin: 4px 0 0;
+  color: #344054;
+  font-size: 13px;
+}
+
+.ai-test-result {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
 .restart-badge {
   padding: 4px 8px;
   border-radius: 999px;
@@ -833,6 +1040,19 @@ button:disabled {
   background: #dcfce7;
 }
 
+.update-badge-idle,
+.update-badge-checking,
+.update-badge-downloading {
+  color: #1d4ed8;
+  background: #dbeafe;
+}
+
+.update-badge-available,
+.update-badge-downloaded {
+  color: #166534;
+  background: #dcfce7;
+}
+
 .remote-origin {
   margin-bottom: 0;
   overflow-wrap: anywhere;
@@ -844,6 +1064,67 @@ button:disabled {
   color: #101828;
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
+}
+
+.update-release,
+.update-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.update-release strong {
+  color: #101828;
+  font-size: 14px;
+}
+
+.update-release span,
+.update-progress span {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.update-progress progress {
+  width: 100%;
+  height: 9px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: #e7edf6;
+}
+
+.update-progress progress::-webkit-progress-bar {
+  border-radius: inherit;
+  background: #e7edf6;
+}
+
+.update-progress progress::-webkit-progress-value {
+  border-radius: inherit;
+  background: #2563eb;
+}
+
+.update-progress progress::-moz-progress-bar {
+  border-radius: inherit;
+  background: #2563eb;
+}
+
+.update-notes summary {
+  cursor: pointer;
+  color: #475467;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.update-notes pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 10px 0 0;
+  padding: 12px;
+  border-radius: 8px;
+  color: #101828;
+  background: #f8fafc;
+  font-size: 12px;
+  white-space: pre-wrap;
 }
 
 .toggle-grid,
@@ -939,6 +1220,7 @@ button:disabled {
   h1,
   h2,
   h3,
+  .update-release strong,
   .recommendation-main strong,
   .file-main strong,
   .doctor-reasons strong,
@@ -1040,6 +1322,10 @@ button:disabled {
   .smart-assistant-card,
   .speed-doctor-card,
   .assistant-panel > div + div,
+  .app-update-settings + .ai-settings,
+  .app-update-settings + .network-settings,
+  .ai-settings + .network-settings,
+  .ai-settings,
   .remote-access-settings,
   .automation-section,
   .automation-item + .automation-item,
@@ -1065,6 +1351,35 @@ button:disabled {
   }
 
   .ok-badge {
+    color: #bbf7d0;
+    background: #14532d;
+  }
+
+  .health-summary,
+  .ai-advice-bubble,
+  .doctor-details pre {
+    color: #dbeafe;
+    border-color: #233047;
+    background: #111c31;
+  }
+
+  .ai-advice-bubble strong {
+    color: #bfdbfe;
+  }
+
+  .ai-advice-bubble p {
+    color: #dbeafe;
+  }
+
+  .update-badge-idle,
+  .update-badge-checking,
+  .update-badge-downloading {
+    color: #bfdbfe;
+    background: #1e3a8a;
+  }
+
+  .update-badge-available,
+  .update-badge-downloaded {
     color: #bbf7d0;
     background: #14532d;
   }
@@ -1096,8 +1411,30 @@ button:disabled {
     background: #020617;
   }
 
+  .update-progress progress,
+  .update-progress progress::-webkit-progress-bar {
+    background: #233047;
+  }
+
+  .update-notes summary,
+  .update-release span,
+  .update-progress span {
+    color: #a8b3c7;
+  }
+
+  .update-notes pre {
+    color: #e5e7eb;
+    background: #020617;
+  }
+
   .warning-list {
     color: #fbbf24;
+  }
+
+  .assistant-schedule {
+    border-color: #334155;
+    color: #dbeafe;
+    background: #0f172a;
   }
 
   .diagnostic-item.warning {

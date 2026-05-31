@@ -8,10 +8,10 @@
 
 Для Windows нужно поддержать два варианта:
 
-- `sTorent Setup.exe` - обычный установщик для Windows 10/11.
+- `sTorent-Setup.exe` - обычный установщик для Windows 10/11.
 - `sTorent Portable.exe` - portable-версия без установки, если выбранный стек это позволяет.
 
-Приоритет для MVP: `sTorent Setup.exe`.
+Приоритет для MVP: `sTorent-Setup.exe`.
 
 ## Требования к .exe
 

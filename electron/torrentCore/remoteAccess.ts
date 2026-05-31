@@ -18,6 +18,8 @@ import {
   type RemoteAccessSettingsState,
   type SetTorrentFilePriorityRequest,
   type SpeedLimitSettings,
+  type SpeedDoctorHistorySummary,
+  type SpeedDoctorReportExport,
   type TorrentCoreSnapshot,
   type TorrentCoreResult,
   type TorrentSpeedDoctorReport,
@@ -75,6 +77,8 @@ export interface RemoteAccessCore {
   updateProfile(request: UpdateTorrentProfileRequest): TorrentSummary;
   setFilePriority(request: SetTorrentFilePriorityRequest): TorrentSummary;
   runSpeedDoctor(id: string): Promise<TorrentSpeedDoctorReport>;
+  getSpeedDoctorHistory(): SpeedDoctorHistorySummary;
+  exportSpeedDoctorReport(id: string): Promise<SpeedDoctorReportExport>;
   getSnapshot(): TorrentCoreSnapshot;
   getNetworkSettingsState(): NetworkSettingsState;
   updateNetworkSettings(settings: NetworkSettings): Promise<NetworkSettingsState>;
@@ -301,12 +305,35 @@ export class RemoteAccessServer {
         return;
       }
 
+      if (request.method === "GET" && route === "speed-doctor/history") {
+        sendJson(
+          response,
+          200,
+          toOkResult(this.options.core.getSpeedDoctorHistory())
+        );
+        return;
+      }
+
       if (request.method === "POST" && route === "torrents/magnet") {
         const body = await readJsonBody<AddMagnetRequest>(request);
         sendJson(
           response,
           200,
           await toResult(() => this.options.core.addMagnet(body))
+        );
+        return;
+      }
+
+      const speedDoctorExportMatch = route.match(
+        /^torrents\/([^/]+)\/speed-doctor\/export$/
+      );
+
+      if (request.method === "POST" && speedDoctorExportMatch) {
+        const id = decodeURIComponent(speedDoctorExportMatch[1]);
+        sendJson(
+          response,
+          200,
+          await toResult(() => this.options.core.exportSpeedDoctorReport(id))
         );
         return;
       }

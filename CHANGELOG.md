@@ -2,6 +2,19 @@
 
 All notable changes to sTorent are documented in this file.
 
+## [0.1.2] - 2026-05-31
+
+### Added
+
+- Smart Download Assistant persistence for profile usage, dismissed warnings, health events, AI advice events, and schedule suggestions.
+- SQLite-backed Speed Doctor history with 24h/7d summaries, anomaly detection, ISP throttling hints, and report export coverage.
+- Native AnythingLLM, local AI provider, update, signed-build, port mapping, and Windows release workflows.
+
+### Changed
+
+- Split Speed Doctor into quick automatic scans and full diagnostics with extended port, proxy, tracker, DHT, disk, and NAT traversal checks.
+- Expanded assistant and Speed Doctor UI, IPC contracts, remote API routes, translations, documentation, and automated tests.
+
 ## [0.1.1] - 2026-05-30
 
 ### Added

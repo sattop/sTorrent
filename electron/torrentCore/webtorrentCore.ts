@@ -11,6 +11,10 @@ import WebTorrent, {
 import {
   type AddMagnetRequest,
   type AddTorrentFileRequest,
+  type AssistantProfileApplyRequest,
+  type AssistantScheduleSuggestion,
+  type AssistantState,
+  type AssistantWarningDismissRequest,
   type AutomationSettings,
   type AutomationSettingsState,
   type DownloadProfileId,
@@ -19,6 +23,8 @@ import {
   type NetworkSettings,
   type NetworkSettingsState,
   type SetTorrentFilePriorityRequest,
+  type SpeedDoctorScanMode,
+  type SpeedDoctorPortCheckResult,
   type WatchFolderScanResult,
   type WatchFolderSettings,
   type TorrentFilePriority,
@@ -34,6 +40,7 @@ import {
   type UpdateTorrentLabelsRequest,
   type UpdateTorrentProfileRequest
 } from "./contracts.js";
+import { AssistantStateStore } from "./assistantState.js";
 import {
   AUTOMATION_CAPABILITIES,
   DEFAULT_AUTOMATION_SETTINGS,
@@ -55,10 +62,14 @@ import {
   toWebTorrentLimit
 } from "./networkSettings.js";
 import { buildWebTorrentAddOptions } from "./profiles.js";
+import { tryMapIncomingPort } from "./portMapping.js";
 import {
   createTorrentSpeedDoctorReport,
   type SpeedDoctorDiskInput
 } from "./speedDoctor.js";
+import { SpeedHistoryStore } from "./speedHistory.js";
+
+const FULL_SCAN_EXTERNAL_PORT_TIMEOUT_MS = 10_000;
 
 type PersistedTorrentSource =
   | {
@@ -114,6 +125,10 @@ export interface WebTorrentCoreOptions {
   stateFilePath: string;
   networkSettingsFilePath: string;
   automationSettingsFilePath: string;
+  speedHistoryFilePath: string;
+  assistantProfileUsageFilePath: string;
+  assistantWarningDismissedFilePath: string;
+  speedDoctorReportDirectoryPath: string;
 }
 
 export class WebTorrentCore extends EventEmitter {
@@ -127,10 +142,18 @@ export class WebTorrentCore extends EventEmitter {
   private activeNetworkSettings = DEFAULT_NETWORK_SETTINGS;
   private automationSettings = DEFAULT_AUTOMATION_SETTINGS;
   private activeSpeedScheduleId: string | null = null;
+  private readonly speedHistory = new SpeedHistoryStore();
+  private readonly assistantState: AssistantStateStore;
+  private lastSpeedHistorySampleAt = 0;
+  private speedHistoryDirty = false;
 
   constructor(private readonly options: WebTorrentCoreOptions) {
     super();
 
+    this.assistantState = new AssistantStateStore({
+      profileUsageFilePath: options.assistantProfileUsageFilePath,
+      warningDismissedFilePath: options.assistantWarningDismissedFilePath
+    });
     this.client = this.createClient(this.activeNetworkSettings);
 
     this.progressTimer = setInterval(() => {
@@ -138,6 +161,7 @@ export class WebTorrentCore extends EventEmitter {
         this.updateRuntimeStats(record);
         this.emitCore("torrent.progress.updated", this.toSummary(record));
       }
+      this.recordSpeedHistorySample(false);
     }, 1_000);
     this.progressTimer.unref();
 
@@ -196,6 +220,28 @@ export class WebTorrentCore extends EventEmitter {
     this.automationSettings = normalizeAutomationSettings(persistedSettings);
     this.configureWatchFolders();
     this.applyAutomationRuntimeSettings(false);
+  }
+
+  async restoreSpeedHistory() {
+    try {
+      await this.speedHistory.restore(this.options.speedHistoryFilePath);
+    } catch (error) {
+      this.emitCore("torrent.error", {
+        id: null,
+        message: getErrorMessage(error)
+      });
+    }
+  }
+
+  async restoreAssistantState() {
+    try {
+      await this.assistantState.restore();
+    } catch (error) {
+      this.emitCore("torrent.error", {
+        id: null,
+        message: getErrorMessage(error)
+      });
+    }
   }
 
   async restore() {
@@ -314,21 +360,139 @@ export class WebTorrentCore extends EventEmitter {
     return report;
   }
 
-  async runSpeedDoctor(id: string) {
+  async runSpeedDoctor(id: string, mode: SpeedDoctorScanMode = "full") {
+    const start = Date.now();
     const record = this.getRecord(id);
     this.updateRuntimeStats(record);
+    this.recordSpeedHistorySample(true);
     const torrent = this.toSummary(record);
     const disk = await getDiskSpace(torrent.savePath || record.downloadPath);
+    const runtime = await this.createSpeedDoctorRuntime(record, mode);
+    const portCheck = await this.createPortCheckResult(runtime, mode);
     const report = createTorrentSpeedDoctorReport({
       torrent,
       network: this.getNetworkSettingsState(),
       automation: this.getAutomationSettingsState(),
       disk,
-      runtime: await this.createSpeedDoctorRuntime(record)
+      runtime,
+      speedHistory: this.speedHistory.getSummary(),
+      portCheck,
+      scanMode: mode,
+      durationMs: Date.now() - start
     });
 
     this.emitCore("diagnostics.torrent_speed.checked", { report });
+    this.emitCore("speedDoctor.status.updated", {
+      torrentId: report.torrentId,
+      portOpen: portCheck.externallyReachable,
+      dhtNodes: getDhtNodeCount(this.client),
+      trackerCount: runtime.trackerHosts.length,
+      currentSpeedKb: Math.round(torrent.downloadSpeedBytes / 1024)
+    });
+    for (const anomaly of report.technicalDetails.anomalies) {
+      this.emitCore("speedDoctor.anomaly.detected", {
+        torrentId: report.torrentId,
+        anomaly
+      });
+    }
+    this.emitCore("speedDoctor.diagnosis.ready", {
+      torrentId: report.torrentId,
+      diagnoses: report.technicalDetails.diagnoses
+    });
+    this.emitAssistantScheduleSuggestion(report.torrentId);
     return report;
+  }
+
+  getSpeedDoctorHistory() {
+    return this.speedHistory.getSummary();
+  }
+
+  getAssistantState(): AssistantState {
+    return this.assistantState.getState();
+  }
+
+  async dismissAssistantWarning(request: AssistantWarningDismissRequest) {
+    return this.assistantState.dismissWarning(request);
+  }
+
+  async applyAssistantProfile(request: AssistantProfileApplyRequest) {
+    return this.updateProfile({
+      id: request.torrentId,
+      profileId: request.profileId,
+      source: request.source ?? "api"
+    });
+  }
+
+  getAssistantScheduleSuggestion(id: string) {
+    const suggestion = this.createAssistantScheduleSuggestion(id);
+
+    if (suggestion) {
+      this.emitCore("assistant.schedule.suggestion", { suggestion });
+    }
+
+    return suggestion;
+  }
+
+  async mapIncomingPort() {
+    const currentSettings = this.networkSettings;
+    const port = currentSettings.incomingPort ?? 51413;
+
+    if (
+      currentSettings.incomingPort !== port ||
+      !currentSettings.upnp ||
+      !currentSettings.natPmp
+    ) {
+      await this.updateNetworkSettings({
+        ...currentSettings,
+        incomingPort: port,
+        upnp: true,
+        natPmp: true
+      });
+    }
+
+    const mapping = await tryMapIncomingPort(port);
+    const runtime = await this.createAggregateRuntime();
+    const portCheck = await this.createPortCheckResult(
+      {
+        ...runtime,
+        incomingPortProbe: await probeIncomingPort(port)
+      },
+      "full",
+      mapping
+    );
+
+    this.emitCore("speedDoctor.status.updated", {
+      torrentId: "",
+      portOpen: portCheck.externallyReachable,
+      dhtNodes: getDhtNodeCount(this.client),
+      trackerCount: runtime.trackerHosts.length,
+      currentSpeedKb: Math.round(toNonNegativeNumber(this.client.downloadSpeed) / 1024)
+    });
+
+    return portCheck;
+  }
+
+  async exportSpeedDoctorReport(id: string) {
+    const report = await this.runSpeedDoctor(id);
+    const stamp = new Date(report.generatedAt)
+      .toISOString()
+      .replace(/[:.]/g, "-");
+    const reportPath = path.join(
+      this.options.speedDoctorReportDirectoryPath,
+      `report-${stamp}-${sanitizeFileName(report.torrentId)}.txt`
+    );
+
+    await fs.mkdir(path.dirname(reportPath), { recursive: true });
+    await fs.writeFile(reportPath, `${report.technicalDetails.exportText}\n`, "utf8");
+    this.emitCore("speedDoctor.report.ready", {
+      torrentId: report.torrentId,
+      reportPath
+    });
+
+    return {
+      reportPath,
+      report
+    };
   }
 
   async runWatchFolderScan(): Promise<WatchFolderScanResult> {
@@ -459,6 +623,11 @@ export class WebTorrentCore extends EventEmitter {
       profileId: record.profileId,
       appliedOptions: [`profile:${record.profileId}`, "existing_torrent:metadata"]
     });
+    void this.assistantState.recordProfileUse({
+      profileId: record.profileId,
+      torrentId: summary.id,
+      source: request.source ?? "existing_torrent"
+    });
     this.emitCore("torrent.files.updated", summary);
     void this.persistState();
     return summary;
@@ -501,6 +670,10 @@ export class WebTorrentCore extends EventEmitter {
     for (const watcher of this.watchFolderWatchers.values()) {
       watcher.close();
     }
+    if (this.speedHistoryDirty) {
+      void this.persistSpeedHistory();
+    }
+    this.speedHistory.close();
     this.client.destroy();
   }
 
@@ -575,6 +748,13 @@ export class WebTorrentCore extends EventEmitter {
             ? [...profile.appliedOptions, "network:private_mode"]
             : profile.appliedOptions
         });
+        void this.assistantState.recordProfileUse({
+          profileId: profile.id,
+          torrentId: summary.id,
+          source: "add_dialog"
+        });
+        this.emitAssistantHealth(summary);
+        this.emitAssistantScheduleSuggestion(summary.id);
         void this.persistState();
         resolve(summary);
       };
@@ -597,7 +777,10 @@ export class WebTorrentCore extends EventEmitter {
       record.lastActivityAt = record.metadataReceivedAt;
       this.promoteRecordId(record);
       this.applyFilePriorities(record);
-      this.emitCore("torrent.metadata.received", this.toSummary(record));
+      const summary = this.toSummary(record);
+      this.emitCore("torrent.metadata.received", summary);
+      this.emitAssistantHealth(summary);
+      this.emitAssistantScheduleSuggestion(summary.id);
       this.emitStatus(record);
       void this.persistState();
     });
@@ -786,11 +969,13 @@ export class WebTorrentCore extends EventEmitter {
   }
 
   private async createSpeedDoctorRuntime(
-    record: TorrentRecord
+    record: TorrentRecord,
+    mode: SpeedDoctorScanMode
   ): Promise<SpeedDoctorRuntimeInput> {
     const snapshot = this.getSnapshot();
     const activeSettings = this.getNetworkSettingsState().activeSettings;
     const configuredProxy = this.networkSettings.proxy;
+    const isFullScan = mode === "full";
 
     return {
       activeTorrentCount: snapshot.torrents.filter(
@@ -807,10 +992,151 @@ export class WebTorrentCore extends EventEmitter {
       noPeersSources: [...record.noPeersSources],
       recentErrors: [...record.recentErrors],
       stalledSeconds: getElapsedSeconds(record.stalledSince),
-      lockedFileCount: await getLockedFileCount(record),
+      lockedFileCount: isFullScan ? await getLockedFileCount(record) : 0,
+      incomingPortProbe: await probeIncomingPort(activeSettings.incomingPort),
+      proxyProbe: isFullScan ? await probeProxy(configuredProxy) : "unknown"
+    };
+  }
+
+  private async createAggregateRuntime(): Promise<SpeedDoctorRuntimeInput> {
+    const snapshot = this.getSnapshot();
+    const activeSettings = this.getNetworkSettingsState().activeSettings;
+    const configuredProxy = this.networkSettings.proxy;
+
+    return {
+      activeTorrentCount: snapshot.torrents.filter(
+        (item) => item.status === "downloading" || item.status === "seeding"
+      ).length,
+      activeDownloadCount: snapshot.torrents.filter(
+        (item) => item.status === "downloading"
+      ).length,
+      connectedSeeds: snapshot.torrents.reduce(
+        (total, torrent) => total + torrent.connectedSeeds,
+        0
+      ),
+      queuedPeerCount: 0,
+      trackerHosts: Array.from(
+        new Set(snapshot.torrents.flatMap((torrent) => torrent.trackerHosts))
+      ),
+      trackerErrorCount: [...this.records.values()].reduce(
+        (total, record) => total + record.trackerErrorCount,
+        0
+      ),
+      lastTrackerError:
+        [...this.records.values()].find((record) => record.lastTrackerError)
+          ?.lastTrackerError ?? null,
+      noPeersSources: Array.from(
+        new Set([...this.records.values()].flatMap((record) => record.noPeersSources))
+      ),
+      recentErrors: [...this.records.values()].flatMap((record) => record.recentErrors),
+      stalledSeconds: null,
+      lockedFileCount: 0,
       incomingPortProbe: await probeIncomingPort(activeSettings.incomingPort),
       proxyProbe: await probeProxy(configuredProxy)
     };
+  }
+
+  private async createPortCheckResult(
+    runtime: SpeedDoctorRuntimeInput,
+    mode: SpeedDoctorScanMode,
+    mapping?: {
+      upnpStatus: SpeedDoctorPortCheckResult["upnpStatus"];
+      natPmpStatus: SpeedDoctorPortCheckResult["natPmpStatus"];
+      notes: string[];
+    }
+  ): Promise<SpeedDoctorPortCheckResult> {
+    const settings = this.getNetworkSettingsState().activeSettings;
+    const notes: string[] = [];
+    let externallyReachable: boolean | null = null;
+
+    if (settings.incomingPort === null) {
+      notes.push("Incoming port is automatic; external reachability cannot be checked.");
+    } else if (mode === "full") {
+      externallyReachable = await probeExternalPort(
+        settings.incomingPort,
+        FULL_SCAN_EXTERNAL_PORT_TIMEOUT_MS
+      );
+
+      if (externallyReachable === null) {
+        notes.push("External port check service did not return a conclusive result.");
+      }
+    } else {
+      notes.push("Quick scan skipped the external port check.");
+    }
+
+    if (settings.upnp || settings.natPmp) {
+      notes.push("NAT traversal is enabled; router mapping support is router-dependent.");
+    }
+
+    notes.push(...(mapping?.notes ?? []));
+
+    return {
+      port: settings.incomingPort,
+      protocol: "tcp",
+      localBinding: runtime.incomingPortProbe,
+      externallyReachable,
+      firewallBlocked:
+        externallyReachable === false || runtime.incomingPortProbe === "failed"
+          ? true
+          : externallyReachable === true
+            ? false
+            : null,
+      upnpStatus: mapping?.upnpStatus ?? (settings.upnp ? "enabled" : "disabled"),
+      natPmpStatus: mapping?.natPmpStatus ?? (settings.natPmp ? "enabled" : "disabled"),
+      notes
+    };
+  }
+
+  private recordSpeedHistorySample(force: boolean) {
+    const now = Date.now();
+
+    if (!force && now - this.lastSpeedHistorySampleAt < 60_000) {
+      return;
+    }
+
+    this.lastSpeedHistorySampleAt = now;
+    const snapshot = this.getSnapshot();
+    const activeTorrents = snapshot.torrents.filter(
+      (torrent) => torrent.status === "downloading" || torrent.status === "seeding"
+    );
+    const stalledCount = [...this.records.values()].filter(
+      (record) => record.stalledSince !== null
+    ).length;
+
+    this.speedHistory.record({
+      timestamp: new Date(now).toISOString(),
+      downloadSpeedKb: Math.round(toNonNegativeNumber(this.client.downloadSpeed) / 102.4) / 10,
+      uploadSpeedKb: Math.round(toNonNegativeNumber(this.client.uploadSpeed) / 102.4) / 10,
+      activeTorrents: activeTorrents.length,
+      activePeers: activeTorrents.reduce((total, torrent) => total + torrent.peers, 0),
+      connectedSeeds: activeTorrents.reduce(
+        (total, torrent) => total + torrent.connectedSeeds,
+        0
+      ),
+      trackerErrors: [...this.records.values()].reduce(
+        (total, record) => total + record.trackerErrorCount,
+        0
+      ),
+      diskWriteSpeedKb: stalledCount > 0
+        ? 0
+        : Math.round(toNonNegativeNumber(this.client.downloadSpeed) / 102.4) / 10,
+      diskQueueDepth: stalledCount,
+      dhtNodes: getDhtNodeCount(this.client)
+    });
+    this.speedHistoryDirty = true;
+    void this.persistSpeedHistory();
+  }
+
+  private async persistSpeedHistory() {
+    try {
+      await this.speedHistory.persist(this.options.speedHistoryFilePath);
+      this.speedHistoryDirty = false;
+    } catch (error) {
+      this.emitCore("torrent.error", {
+        id: null,
+        message: getErrorMessage(error)
+      });
+    }
   }
 
   private createClient(settings: NetworkSettings) {
@@ -1034,6 +1360,60 @@ export class WebTorrentCore extends EventEmitter {
     return false;
   }
 
+  private emitAssistantHealth(torrent: TorrentSummary) {
+    this.emitCore("assistant.health.computed", createAssistantHealthPayload(torrent));
+  }
+
+  private emitAssistantScheduleSuggestion(torrentId: string) {
+    const suggestion = this.createAssistantScheduleSuggestion(torrentId);
+
+    if (suggestion) {
+      this.emitCore("assistant.schedule.suggestion", { suggestion });
+    }
+  }
+
+  private createAssistantScheduleSuggestion(
+    torrentId: string
+  ): AssistantScheduleSuggestion | null {
+    const history = this.speedHistory.getSummary();
+
+    if (history.sampleCount < 8 || history.bestHours.length === 0) {
+      return null;
+    }
+
+    const bestHours = history.bestHours.slice(0, 4);
+    const primaryHour = bestHours[0];
+    const recommendedEndHour = (primaryHour + 3) % 24;
+    const currentHour = new Date().getHours();
+    const currentAverage = history.averageByHourKb[currentHour] ?? 0;
+    const bestAverage = history.averageByHourKb[primaryHour] ?? 0;
+    const expectedSpeedupPercent =
+      currentAverage > 0 && bestAverage > currentAverage
+        ? Math.round(((bestAverage - currentAverage) / currentAverage) * 100)
+        : 0;
+    const nightFaster = bestHours.some(
+      (hour) => hour >= 23 || (hour >= 0 && hour <= 6)
+    );
+    const confidence = Math.min(0.95, Math.max(0.25, history.sampleCount / 72));
+    const hoursText = bestHours.map((hour) => `${hour}:00`).join(", ");
+    const message = nightFaster
+      ? `Usually downloads are faster at night around ${hoursText}. You can create an off-peak schedule for large torrents.`
+      : `Usually downloads are fastest around ${hoursText}. You can schedule heavy downloads for those hours.`;
+
+    return {
+      torrentId,
+      generatedAt: new Date().toISOString(),
+      bestHours,
+      recommendedStartHour: primaryHour,
+      recommendedEndHour,
+      expectedSpeedupPercent,
+      nightFaster,
+      confidence: Math.round(confidence * 100) / 100,
+      sampleCount: history.sampleCount,
+      message
+    };
+  }
+
   private emitCore<EventName extends keyof TorrentCoreEventPayloadMap>(
     type: EventName,
     payload: TorrentCoreEventPayloadMap[EventName]
@@ -1106,6 +1486,110 @@ function createEmptyWatchFolderScanResult(): WatchFolderScanResult {
     skippedTorrents: 0,
     errors: []
   };
+}
+
+function createAssistantHealthPayload(torrent: TorrentSummary) {
+  const score = computeAssistantHealthScore(torrent);
+  const warnings: string[] = [];
+
+  if (torrent.metadataReady && torrent.seeds === 0) {
+    warnings.push("no_seeders");
+  }
+
+  if (torrent.metadataReady && torrent.seeds <= 1 && torrent.peers <= 2) {
+    warnings.push("low_peer_availability");
+  }
+
+  if (torrent.private && torrent.trackerHosts.length === 0) {
+    warnings.push("private_no_tracker");
+  }
+
+  if (!torrent.metadataReady) {
+    warnings.push("metadata_pending");
+  }
+
+  return {
+    torrentId: torrent.id,
+    score,
+    status: getAssistantHealthStatus(score),
+    warnings,
+    suggestedProfile: suggestAssistantProfile(torrent),
+    computedAt: new Date().toISOString()
+  };
+}
+
+function computeAssistantHealthScore(torrent: TorrentSummary) {
+  let score = 50;
+
+  if (!torrent.metadataReady && torrent.sourceType === "magnet") {
+    score -= 5;
+  }
+
+  if (torrent.seeds === 0) {
+    score -= 40;
+  } else if (torrent.seeds < 3) {
+    score -= 20;
+  } else if (torrent.seeds < 10) {
+    score -= 5;
+  } else if (torrent.seeds >= 50) {
+    score += 20;
+  } else if (torrent.seeds >= 10) {
+    score += 10;
+  }
+
+  const ratio = torrent.peers > 0 ? torrent.seeds / torrent.peers : torrent.seeds;
+
+  if (ratio < 0.1) {
+    score -= 15;
+  } else if (ratio > 2) {
+    score += 10;
+  }
+
+  if (torrent.trackerHosts.length === 0) {
+    score -= 10;
+  }
+
+  if (torrent.trackerHosts.length >= 3) {
+    score += 5;
+  }
+
+  if (torrent.private && torrent.trackerHosts.length === 0) {
+    score -= 20;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function getAssistantHealthStatus(score: number) {
+  if (score >= 75) {
+    return "good" as const;
+  }
+
+  if (score >= 50) {
+    return "normal" as const;
+  }
+
+  if (score >= 25) {
+    return "weak" as const;
+  }
+
+  return "critical" as const;
+}
+
+function suggestAssistantProfile(torrent: TorrentSummary): DownloadProfileId {
+  if (torrent.selectedProfileId !== "manual") {
+    return torrent.selectedProfileId;
+  }
+
+  if (torrent.private) {
+    return "private_tracker";
+  }
+
+  if (torrent.files.some((file) => isMediaFile(file.path || file.name))) {
+    return "stream_while_downloading";
+  }
+
+  return "max_speed";
 }
 
 function clamp(value: unknown) {
@@ -1302,6 +1786,42 @@ async function probeIncomingPort(
   });
 }
 
+async function probeExternalPort(
+  port: number,
+  timeoutMs = 2_500
+): Promise<boolean | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`https://portchecker.co/check?port=${port}`, {
+      signal: controller.signal,
+      headers: {
+        Accept: "text/plain, text/html, application/json"
+      }
+    });
+    const text = (await response.text()).toLowerCase();
+
+    if (!response.ok) {
+      return null;
+    }
+
+    if (/\b(open|success|reachable)\b/.test(text) && !/\b(closed|blocked)\b/.test(text)) {
+      return true;
+    }
+
+    if (/\b(closed|blocked|failed|unreachable|not open)\b/.test(text)) {
+      return false;
+    }
+
+    return null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function probeProxy(
   proxy: NetworkSettings["proxy"]
 ): Promise<SpeedDoctorProbeStatus> {
@@ -1385,6 +1905,23 @@ function getNetworkInterfaces(): NetworkInterfaceInfo[] {
       mac: address.mac && address.mac !== "00:00:00:00:00:00" ? address.mac : null
     }))
   );
+}
+
+function getDhtNodeCount(client: WebTorrent) {
+  const withDht = client as WebTorrent & {
+    dht?: {
+      nodes?: unknown[];
+      table?: {
+        nodes?: unknown[];
+      };
+    };
+  };
+
+  return withDht.dht?.nodes?.length ?? withDht.dht?.table?.nodes?.length ?? 0;
+}
+
+function sanitizeFileName(value: string) {
+  return value.replace(/[^a-z0-9_-]+/gi, "-").slice(0, 64) || "torrent";
 }
 
 function getErrorMessage(error: unknown) {

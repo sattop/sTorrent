@@ -35,8 +35,11 @@ jobs:
       - name: Run tests
         run: npm test -- --run
 
-      - name: Build Windows app
-        run: npm run build:windows
+      - name: Build signed Windows app
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: npm run build:windows:signed
 
       - name: Prepare release notes
         run: npm run release:notes -- ${{ github.ref_name }}
@@ -51,5 +54,7 @@ jobs:
           body_path: release/RELEASE_NOTES.md
           fail_on_unmatched_files: true
           files: |
-            release/sTorent Setup.exe
+            release/sTorent-Setup.exe
+            release/sTorent-Setup.exe.blockmap
+            release/latest.yml
             release/SHA256SUMS.txt

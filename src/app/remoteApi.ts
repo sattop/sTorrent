@@ -7,6 +7,9 @@ import type {
   NetworkSettings,
   NetworkSettingsState,
   SetTorrentFilePriorityRequest,
+  SpeedDoctorHistorySummary,
+  SpeedDoctorPortCheckResult,
+  SpeedDoctorReportExport,
   TorrentCoreEvent,
   TorrentCoreResult,
   TorrentCoreSnapshot,
@@ -127,6 +130,22 @@ export function createRemoteTorrentApi(getPassword: () => string): TorrentApi {
         `/api/torrents/${encodeURIComponent(id)}/speed-doctor`,
         getPassword
       ),
+    getSpeedDoctorHistory: () =>
+      apiRequest<SpeedDoctorHistorySummary>("/api/speed-doctor/history", getPassword),
+    exportSpeedDoctorReport: (id: string) =>
+      apiRequest<SpeedDoctorReportExport>(
+        `/api/torrents/${encodeURIComponent(id)}/speed-doctor/export`,
+        getPassword,
+        { method: "POST" }
+      ),
+    mapIncomingPort: () =>
+      Promise.resolve({
+        ok: false,
+        error: {
+          code: "unsupported_remote_port_mapping",
+          message: "Router port mapping is available only in the desktop app."
+        }
+      }) as Promise<TorrentCoreResult<SpeedDoctorPortCheckResult>>,
     getAutomationSettings: () =>
       apiRequest<AutomationSettingsState>("/api/automation-settings", getPassword),
     updateAutomationSettings: (request: AutomationSettings) =>

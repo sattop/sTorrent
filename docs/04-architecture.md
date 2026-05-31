@@ -51,7 +51,7 @@
 
 Минимальная release-схема:
 
-- локальная команда сборки создает `sTorent Setup.exe`;
+- локальная команда сборки создает `sTorent-Setup.exe`;
 - GitHub Actions запускает сборку на `windows-latest`;
 - при создании тега `v*` workflow публикует `.exe` в GitHub Release;
 - checksum-файл публикуется рядом с установщиком;

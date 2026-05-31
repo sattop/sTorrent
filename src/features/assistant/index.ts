@@ -7,6 +7,7 @@ import {
   type SmartAssistantReasonCode,
   type SmartAssistantRecommendation,
   type SmartAssistantSuggestion,
+  type TorrentHealthStatus,
   type SmartAssistantWarningCode
 } from "./types";
 
@@ -66,6 +67,20 @@ export function createSmartAssistantRecommendation(
     mediaIntent,
     trafficSaverIntent
   });
+  const healthScore = computeTorrentHealthScore({
+    seeders: input.seeds ?? 0,
+    leechers: input.peers ?? 0,
+    trackerCount: input.trackerCount ?? 0,
+    isPrivate: Boolean(input.privateTorrent),
+    hasWebSeeds: Boolean(input.hasWebSeeds),
+    totalSizeBytes: sizeBytes,
+    fileCount: files.length,
+    magnetOnly: input.sourceType === "magnet",
+    metadataReceived: input.metadataReady !== false,
+    freeDiskBytes: input.disk?.availableBytes ?? null,
+    creationDateSeconds: input.creationDateSeconds ?? null
+  });
+  const healthStatus = getTorrentHealthStatus(healthScore);
 
   let profileId: DownloadProfileId = "max_speed";
   let confidence = 0.68;
@@ -126,6 +141,18 @@ export function createSmartAssistantRecommendation(
     warnings.push("low_peer_availability");
   }
 
+  if (Boolean(input.metadataReady) && (input.seeds ?? 0) === 0) {
+    warnings.push("no_seeders");
+  }
+
+  if (Boolean(input.privateTorrent) && (input.trackerCount ?? 0) === 0) {
+    warnings.push("private_no_tracker");
+  }
+
+  if (isOldWeakTorrent(input)) {
+    warnings.push("old_torrent");
+  }
+
   if (input.favoriteFolderSelected) {
     reasons.push("favorite_folder_selected");
   } else if (folderTemplate) {
@@ -163,14 +190,18 @@ export function createSmartAssistantRecommendation(
     });
   }
 
-  if (profileId === "stream_while_downloading" && mediaFiles[0]) {
-    suggestions.push({
-      type: "file_priority",
-      value: "high",
-      filePath: mediaFiles[0].path || mediaFiles[0].name,
-      requiresConfirmation: true
-    });
+  const filePrioritySuggestions = createFilePrioritySuggestions(files, {
+    mediaIntent,
+    profileId
+  });
+
+  if (
+    filePrioritySuggestions.some((suggestion) => suggestion.value === "skip")
+  ) {
+    warnings.push("optional_files_deprioritized");
   }
+
+  suggestions.push(...filePrioritySuggestions);
 
   if (hasEnoughDisk === false || conflictingFiles.length > 0) {
     suggestions.push({
@@ -197,6 +228,8 @@ export function createSmartAssistantRecommendation(
   return {
     profileId,
     confidence,
+    healthScore,
+    healthStatus,
     reasons: Array.from(new Set(reasons)),
     warnings: Array.from(new Set(warnings)),
     suggestions: dedupeSuggestions(suggestions),
@@ -213,8 +246,104 @@ export type {
   SmartAssistantRecommendation,
   SmartAssistantReasonCode,
   SmartAssistantSuggestion,
+  TorrentHealthStatus,
   SmartAssistantWarningCode
 } from "./types";
+
+interface TorrentHealthContext {
+  seeders: number;
+  leechers: number;
+  trackerCount: number;
+  isPrivate: boolean;
+  hasWebSeeds: boolean;
+  totalSizeBytes: number;
+  fileCount: number;
+  magnetOnly: boolean;
+  metadataReceived: boolean;
+  freeDiskBytes: number | null;
+  creationDateSeconds: number | null;
+}
+
+export function computeTorrentHealthScore(ctx: TorrentHealthContext): number {
+  let score = 50;
+
+  if (!ctx.metadataReceived && ctx.magnetOnly) {
+    score -= 5;
+  }
+
+  if (ctx.seeders === 0) {
+    score -= 40;
+  } else if (ctx.seeders < 3) {
+    score -= 20;
+  } else if (ctx.seeders < 10) {
+    score -= 5;
+  } else if (ctx.seeders >= 50) {
+    score += 20;
+  } else if (ctx.seeders >= 10) {
+    score += 10;
+  }
+
+  const ratio = ctx.leechers > 0 ? ctx.seeders / ctx.leechers : ctx.seeders;
+
+  if (ratio < 0.1) {
+    score -= 15;
+  } else if (ratio > 2) {
+    score += 10;
+  }
+
+  if (ctx.trackerCount === 0 && !ctx.hasWebSeeds) {
+    score -= 10;
+  }
+
+  if (ctx.trackerCount >= 3) {
+    score += 5;
+  }
+
+  if (ctx.hasWebSeeds) {
+    score += 10;
+  }
+
+  if (
+    ctx.freeDiskBytes !== null &&
+    ctx.totalSizeBytes > 0 &&
+    ctx.totalSizeBytes > ctx.freeDiskBytes * 0.95
+  ) {
+    score -= 20;
+  }
+
+  if (ctx.isPrivate && ctx.trackerCount === 0) {
+    score -= 20;
+  }
+
+  if (ctx.creationDateSeconds) {
+    const ageMonths =
+      (Date.now() / 1_000 - ctx.creationDateSeconds) / (30 * 86_400);
+
+    if (ageMonths > 24 && ctx.seeders < 5) {
+      score -= 10;
+    }
+  }
+
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+export function getTorrentHealthStatus(
+  score: number
+): TorrentHealthStatus {
+  if (score >= 75) {
+    return "good";
+  }
+
+  if (score >= 50) {
+    return "normal";
+  }
+
+  if (score >= 25) {
+    return "weak";
+  }
+
+  return "critical";
+}
 
 function normalizeSearchableText(parts: string[]) {
   return parts.join(" ").trim().toLowerCase();
@@ -271,6 +400,87 @@ function isMediaFile(file: SmartAssistantFileInput) {
   ].some((extension) =>
     `${file.path} ${file.name}`.toLowerCase().includes(extension)
   );
+}
+
+function createFilePrioritySuggestions(
+  files: SmartAssistantFileInput[],
+  context: { mediaIntent: boolean; profileId: DownloadProfileId }
+): SmartAssistantSuggestion[] {
+  const suggestions: SmartAssistantSuggestion[] = [];
+  const selectedFiles = files.filter((file) => file.selected !== false);
+  const mediaFiles = selectedFiles.filter(isMediaFile).sort(compareSeriesFiles);
+
+  for (const file of selectedFiles) {
+    if (isOptionalSidecarFile(file)) {
+      suggestions.push({
+        type: "file_priority",
+        value: "skip",
+        label: file.name,
+        filePath: file.path || file.name,
+        requiresConfirmation: true
+      });
+    }
+  }
+
+  if (context.profileId === "stream_while_downloading" && mediaFiles[0]) {
+    suggestions.push({
+      type: "file_priority",
+      value: "high",
+      label: mediaFiles[0].name,
+      filePath: mediaFiles[0].path || mediaFiles[0].name,
+      requiresConfirmation: true
+    });
+  }
+
+  if (context.mediaIntent) {
+    for (const file of selectedFiles.filter(isArchivePart).slice(0, 3)) {
+      suggestions.push({
+        type: "file_priority",
+        value: "high",
+        label: file.name,
+        filePath: file.path || file.name,
+        requiresConfirmation: true
+      });
+    }
+  }
+
+  return suggestions;
+}
+
+function isOptionalSidecarFile(file: SmartAssistantFileInput) {
+  const value = `${file.path} ${file.name}`.toLowerCase();
+
+  return (
+    /\bsample\b/.test(value) ||
+    /\btrailer\b/.test(value) ||
+    hasExtension(file, [".nfo", ".txt", ".url", ".sfv"]) ||
+    (hasExtension(file, [".srt", ".ass", ".ssa"]) && file.lengthBytes < 256 * 1024)
+  );
+}
+
+function isArchivePart(file: SmartAssistantFileInput) {
+  const value = `${file.path} ${file.name}`.toLowerCase();
+  return /\.(rar|r\d{2}|7z|zip|iso)$/.test(value);
+}
+
+function compareSeriesFiles(
+  left: SmartAssistantFileInput,
+  right: SmartAssistantFileInput
+) {
+  const leftKey = getSeriesSortKey(left);
+  const rightKey = getSeriesSortKey(right);
+
+  if (leftKey !== rightKey) {
+    return leftKey - rightKey;
+  }
+
+  return (left.path || left.name).localeCompare(right.path || right.name);
+}
+
+function getSeriesSortKey(file: SmartAssistantFileInput) {
+  const value = `${file.path} ${file.name}`.toLowerCase();
+  const match = value.match(/(?:s\d{1,2}e|episode[ ._-]?|ep[ ._-]?)(\d{1,3})/);
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
 }
 
 function findConflictingFiles(
@@ -367,6 +577,17 @@ function inferTags(
 function hasExtension(file: SmartAssistantFileInput, extensions: string[]) {
   const value = `${file.path} ${file.name}`.toLowerCase();
   return extensions.some((extension) => value.endsWith(extension));
+}
+
+function isOldWeakTorrent(input: SmartAssistantInput) {
+  if (!input.creationDateSeconds) {
+    return false;
+  }
+
+  const ageMonths =
+    (Date.now() / 1_000 - input.creationDateSeconds) / (30 * 86_400);
+
+  return ageMonths > 24 && (input.seeds ?? 0) < 5;
 }
 
 function dedupeSuggestions(suggestions: SmartAssistantSuggestion[]) {

@@ -1,10 +1,21 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { CORE_EVENTS } from "../src/app/events";
-import { DOWNLOAD_PROFILE_IDS as UI_PROFILE_IDS } from "../src/features/assistant";
+import {
+  DOWNLOAD_PROFILE_IDS as UI_PROFILE_IDS,
+  computeTorrentHealthScore,
+  createSmartAssistantRecommendation
+} from "../src/features/assistant";
+import {
+  AI_PROVIDER_DEFINITIONS,
+  DEFAULT_AI_SETTINGS,
+  createDefaultAIProviderConfig,
+  getAIProviderDefinition
+} from "../electron/aiContracts";
+import { ASSISTANT_EVENT_NAMES } from "../electron/assistantEvents";
 import {
   type AutomationSettings,
   DOWNLOAD_PROFILE_IDS as CORE_PROFILE_IDS,
@@ -21,6 +32,7 @@ import {
 } from "../electron/torrentCore/profiles";
 import { createNetworkDiagnosticsReport } from "../electron/torrentCore/networkDiagnostics";
 import { createTorrentSpeedDoctorReport } from "../electron/torrentCore/speedDoctor";
+import { SpeedHistoryStore } from "../electron/torrentCore/speedHistory";
 import {
   DEFAULT_NETWORK_SETTINGS,
   NETWORK_CAPABILITIES,
@@ -49,10 +61,63 @@ describe("torrent-core contracts", () => {
     expect(CORE_PROFILE_IDS).toEqual(UI_PROFILE_IDS);
   });
 
+  it("defines AI providers without storing API keys in default settings", () => {
+    expect(AI_PROVIDER_DEFINITIONS.map((provider) => provider.id)).toEqual(
+      expect.arrayContaining(["anthropic", "openai", "lmstudio", "ollama", "custom"])
+    );
+    expect(getAIProviderDefinition("lmstudio")).toMatchObject({
+      defaultBaseUrl: "http://localhost:1234/v1",
+      requiresApiKey: false
+    });
+    expect(createDefaultAIProviderConfig("openrouter")).toMatchObject({
+      providerId: "openrouter",
+      apiKeyConfigured: false
+    });
+    expect(JSON.stringify(DEFAULT_AI_SETTINGS)).not.toContain('"apiKey":');
+  });
+
+  it("computes assistant health score and exposes it in recommendations", () => {
+    expect(
+      computeTorrentHealthScore({
+        seeders: 80,
+        leechers: 10,
+        trackerCount: 4,
+        isPrivate: false,
+        hasWebSeeds: false,
+        totalSizeBytes: 1024,
+        fileCount: 1,
+        magnetOnly: false,
+        metadataReceived: true,
+        freeDiskBytes: 1024 * 1024,
+        creationDateSeconds: null
+      })
+    ).toBeGreaterThanOrEqual(75);
+
+    const recommendation = createSmartAssistantRecommendation({
+      seeds: 0,
+      peers: 0,
+      trackerCount: 0,
+      metadataReady: true,
+      sourceType: "magnet"
+    });
+
+    expect(recommendation.healthStatus).toBe("critical");
+    expect(recommendation.healthScore).toBeLessThan(25);
+  });
+
   it("emits only event names that are part of the application event model", () => {
     expect(CORE_EVENTS).toEqual(
       expect.arrayContaining([...TORRENT_CORE_EVENT_NAMES])
     );
+  });
+
+  it("exposes the literal Smart Download Assistant event contract", () => {
+    expect(ASSISTANT_EVENT_NAMES).toEqual([
+      "assistant.health.computed",
+      "assistant.llm.response",
+      "assistant.schedule.suggestion",
+      "assistant.profile.applied"
+    ]);
   });
 
   it("applies the private tracker profile without traffic impersonation", () => {
@@ -248,6 +313,36 @@ describe("torrent-core contracts", () => {
     expect(JSON.stringify(report)).not.toContain("private-folder");
   });
 
+  it("keeps Speed Doctor quick and full scan modes explicit in reports", () => {
+    const baseInput = {
+      torrent: createTestTorrentSummary(),
+      network: createTestNetworkState(),
+      automation: createTestAutomationState(),
+      disk: null
+    };
+
+    expect(
+      createTorrentSpeedDoctorReport({
+        ...baseInput,
+        scanMode: "quick",
+        durationMs: 250
+      })
+    ).toMatchObject({
+      scanMode: "quick",
+      durationMs: 250
+    });
+    expect(
+      createTorrentSpeedDoctorReport({
+        ...baseInput,
+        scanMode: "full",
+        durationMs: 12_000
+      })
+    ).toMatchObject({
+      scanMode: "full",
+      durationMs: 12_000
+    });
+  });
+
   it("does not suggest unsafe public discovery changes for private torrents", () => {
     const settings = applyNetworkProfile(
       DEFAULT_NETWORK_SETTINGS,
@@ -349,6 +444,71 @@ describe("torrent-core contracts", () => {
       lockedFileCount: 1
     });
     expect(JSON.stringify(report)).not.toContain("secret-token");
+  });
+
+  it("persists Speed Doctor history in a separate SQLite database", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "storent-history-"));
+    const dbPath = path.join(tempDir, "speed_history.db");
+    const store = new SpeedHistoryStore();
+    const now = new Date();
+
+    await store.restore(dbPath);
+    store.record({
+      timestamp: now.toISOString(),
+      downloadSpeedKb: 2048,
+      uploadSpeedKb: 128,
+      activeTorrents: 1,
+      activePeers: 8,
+      connectedSeeds: 3,
+      trackerErrors: 0,
+      diskWriteSpeedKb: 2048,
+      diskQueueDepth: 0,
+      dhtNodes: 64
+    });
+    await store.persist(dbPath);
+    store.close();
+
+    expect((await stat(dbPath)).isFile()).toBe(true);
+
+    const restored = new SpeedHistoryStore();
+    await restored.restore(dbPath);
+    const summary = restored.getSummary(now);
+
+    expect(summary.sampleCount).toBe(1);
+    expect(summary.peakSpeedLast24hKb).toBe(2048);
+    restored.close();
+  });
+
+  it("migrates legacy JSON speed history into SQLite on first restore", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "storent-history-"));
+    const dbPath = path.join(tempDir, "speed_history.db");
+    const now = new Date();
+    const legacyMetric = {
+      timestamp: now.toISOString(),
+      downloadSpeedKb: 512,
+      uploadSpeedKb: 64,
+      activeTorrents: 1,
+      activePeers: 2,
+      connectedSeeds: 1,
+      trackerErrors: 0,
+      diskWriteSpeedKb: 512,
+      diskQueueDepth: 0,
+      dhtNodes: 12
+    };
+
+    await writeFile(
+      path.join(tempDir, "speed-history.json"),
+      `${JSON.stringify({ version: 1, metrics: [legacyMetric] })}\n`,
+      "utf8"
+    );
+
+    const store = new SpeedHistoryStore();
+    await store.restore(dbPath);
+    const summary = store.getSummary(now);
+
+    expect(summary.sampleCount).toBe(1);
+    expect(summary.peakSpeedLast24hKb).toBe(512);
+    store.close();
   });
 
   it("normalizes stage 5 automation settings without unsafe data removal", () => {
@@ -523,6 +683,38 @@ describe("torrent-core contracts", () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "storent-remote-"));
     const calls: string[] = [];
     const torrent = createTestTorrentSummary();
+    const createReport = (id: string) =>
+      createTorrentSpeedDoctorReport({
+        torrent: { ...torrent, id },
+        network: {
+          settings: DEFAULT_NETWORK_SETTINGS,
+          activeSettings: DEFAULT_NETWORK_SETTINGS,
+          restartRequired: false,
+          capabilities: NETWORK_CAPABILITIES,
+          availableInterfaces: []
+        },
+        automation: {
+          settings: {
+            watchFolders: [],
+            favoriteFolders: [],
+            seedingRules: [],
+            rssRules: [],
+            speedSchedules: [],
+            hooksEnabled: false
+          },
+          capabilities: {
+            watchFolders: true,
+            favoriteFolders: true,
+            seedingRules: true,
+            rssDuplicatePrevention: true,
+            speedLimitSchedules: true,
+            hooks: false,
+            safeDataRemovalOnly: true
+          },
+          activeSpeedScheduleId: null
+        },
+        disk: null
+      });
     const core: RemoteAccessCore = {
       addMagnet: async () => torrent,
       pause: (id) => {
@@ -549,38 +741,12 @@ describe("torrent-core contracts", () => {
         };
       },
       setFilePriority: () => torrent,
-      runSpeedDoctor: async (id) =>
-        createTorrentSpeedDoctorReport({
-          torrent: { ...torrent, id },
-          network: {
-            settings: DEFAULT_NETWORK_SETTINGS,
-            activeSettings: DEFAULT_NETWORK_SETTINGS,
-            restartRequired: false,
-            capabilities: NETWORK_CAPABILITIES,
-            availableInterfaces: []
-          },
-          automation: {
-            settings: {
-              watchFolders: [],
-              favoriteFolders: [],
-              seedingRules: [],
-              rssRules: [],
-              speedSchedules: [],
-              hooksEnabled: false
-            },
-            capabilities: {
-              watchFolders: true,
-              favoriteFolders: true,
-              seedingRules: true,
-              rssDuplicatePrevention: true,
-              speedLimitSchedules: true,
-              hooks: false,
-              safeDataRemovalOnly: true
-            },
-            activeSpeedScheduleId: null
-          },
-          disk: null
-        }),
+      runSpeedDoctor: async (id) => createReport(id),
+      getSpeedDoctorHistory: () => createReport(torrent.id).technicalDetails.speedHistory,
+      exportSpeedDoctorReport: async (id) => ({
+        reportPath: path.join(tempDir, "speed-doctor-report.txt"),
+        report: createReport(id)
+      }),
       getSnapshot: () => ({
         torrents: [torrent],
         downloadSpeedBytes: 0,

@@ -6,7 +6,7 @@
 
 `sTorent` is a Windows desktop BitTorrent client with a clean interface, transparent network settings, Smart Download Assistant foundations, and Speed Doctor diagnostics.
 
-The project is currently an MVP. Core torrent operations work, Windows builds are published automatically, and the next stages focus on stability, auto-update, and smarter recommendations.
+The project is currently an MVP. Core torrent operations work, Windows builds are published automatically, and the next stages focus on stability and smarter recommendations.
 
 ## Download
 
@@ -14,9 +14,9 @@ Latest release: [sTorent v0.1.1](https://github.com/sattop/sTorrent/releases/tag
 
 Download the Windows installer:
 
-[sTorent Setup.exe](https://github.com/sattop/sTorrent/releases/download/v0.1.1/sTorent.Setup.exe)
+[sTorent-Setup.exe](https://github.com/sattop/sTorrent/releases/download/v0.1.1/sTorent-Setup.exe)
 
-The release also includes `SHA256SUMS.txt` for checksum verification.
+The release also includes `latest.yml`, the installer blockmap, and `SHA256SUMS.txt` for update metadata and checksum verification.
 
 ## Features
 
@@ -30,15 +30,16 @@ The release also includes `SHA256SUMS.txt` for checksum verification.
 - Run network diagnostics through Speed Doctor.
 - Configure automation foundations: watch folders, favorite folders, seeding rules, RSS rules, and speed schedules.
 - Enable an optional local WebUI and remote JSON API with password protection.
+- Check, download, and install app updates from GitHub Releases.
 - Switch UI language between Russian, English, Spanish, and Chinese.
-- Build a signed-metadata Windows NSIS installer with app icon and shortcuts.
+- Build a Windows NSIS installer with app icon, shortcuts, update metadata, and Authenticode signing support.
 
 ## Current Limits
 
 - This is not a finished stable `1.0` release.
 - Smart Download Assistant recommendations are still foundational.
 - Speed Doctor provides safe diagnostics and settings guidance, not traffic bypassing.
-- Portable builds and auto-update are planned after the MVP.
+- Portable builds are planned after the MVP.
 - Only Windows installer builds are published right now.
 
 ## Safety
@@ -92,15 +93,27 @@ npm run build:windows
 The installer is written to:
 
 ```text
-release/sTorent Setup.exe
+release/sTorent-Setup.exe
 ```
+
+Build and verify a signed Windows installer:
+
+```powershell
+$env:WIN_CSC_LINK = "C:\path\to\code-signing-certificate.pfx"
+$env:WIN_CSC_KEY_PASSWORD = "certificate-password"
+npm run build:windows:signed
+```
+
+For GitHub Releases, configure repository secrets `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD`. `WIN_CSC_LINK` can be a path, HTTPS URL, or base64-encoded `.pfx`/`.p12` certificate value supported by Electron Builder. The release workflow fails if the installer is not signed with a valid Authenticode signature.
+
+The signed build helper looks for Windows SDK `signtool.exe` automatically. If it cannot find it locally, set `SIGNTOOL_PATH` to the SDK `signtool.exe` path before running the signed build.
 
 ## Release Flow
 
 GitHub Actions are configured for:
 
 - build checks on branch pushes and pull requests to `main`;
-- Windows installer builds on tags matching `v*`;
+- signed Windows installer builds on tags matching `v*`;
 - GitHub Release publishing with `.exe`, `SHA256SUMS.txt`, and changelog notes.
 
 Create a release by pushing a version tag:

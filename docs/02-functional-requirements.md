@@ -115,7 +115,7 @@
 
 Основной формат для Windows:
 
-- `sTorent Setup.exe` - установщик приложения.
+- `sTorent-Setup.exe` - установщик приложения.
 - `sTorent Portable.exe` - дополнительная portable-версия после MVP.
 
 Публикация:
