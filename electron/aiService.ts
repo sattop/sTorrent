@@ -58,12 +58,23 @@ type SafeStorageLike = Pick<
   "decryptString" | "encryptString" | "isEncryptionAvailable"
 >;
 const require = createRequire(import.meta.url);
-const electronModule = require("electron") as Partial<{ safeStorage: SafeStorageLike }>;
-const safeStorage: SafeStorageLike = electronModule.safeStorage ?? {
+const fallbackSafeStorage: SafeStorageLike = {
   isEncryptionAvailable: () => false,
   encryptString: () => Buffer.alloc(0),
   decryptString: () => ""
 };
+function loadElectronSafeStorage(): SafeStorageLike {
+  try {
+    const electronModule = require("electron") as Partial<{
+      safeStorage: SafeStorageLike;
+    }>;
+
+    return electronModule.safeStorage ?? fallbackSafeStorage;
+  } catch {
+    return fallbackSafeStorage;
+  }
+}
+const safeStorage = loadElectronSafeStorage();
 
 export class AIService extends EventEmitter {
   private settings = normalizeAISettings(DEFAULT_AI_SETTINGS);
