@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
-import { safeStorage } from "electron";
 import {
   AI_EVENT_CHANNEL,
   AI_PROVIDER_DEFINITIONS,
@@ -19,7 +19,9 @@ import {
   type AISettingsState,
   type ProviderTestResult,
   createDefaultAIProviderConfig,
-  getAIProviderDefinition
+  getAIProviderConfig,
+  getAIProviderDefinition,
+  normalizeAIProviderBaseUrl
 } from "./aiContracts.js";
 
 interface AIAdapter {
@@ -51,6 +53,17 @@ const SETTINGS_VERSION = 1;
 const KEYS_VERSION = 1;
 const MAX_ERROR_DETAIL_LENGTH = 300;
 const OPENROUTER_REFERER = "https://github.com/sattop/sTorrent";
+type SafeStorageLike = Pick<
+  typeof import("electron").safeStorage,
+  "decryptString" | "encryptString" | "isEncryptionAvailable"
+>;
+const require = createRequire(import.meta.url);
+const electronModule = require("electron") as Partial<{ safeStorage: SafeStorageLike }>;
+const safeStorage: SafeStorageLike = electronModule.safeStorage ?? {
+  isEncryptionAvailable: () => false,
+  encryptString: () => Buffer.alloc(0),
+  decryptString: () => ""
+};
 
 export class AIService extends EventEmitter {
   private settings = normalizeAISettings(DEFAULT_AI_SETTINGS);
@@ -187,14 +200,21 @@ export class AIService extends EventEmitter {
   }
 
   private resolveProviderConfig(config: AIProviderConfig): ResolvedAIProviderConfig {
-    const [normalized] = normalizeAIProviders([config], this.settings.providers);
+    const providerId = normalizeProviderId(config.providerId);
+    const normalized = getAIProviderConfig(
+      normalizeAIProviders([config], this.settings.providers),
+      providerId
+    );
     const definition = getAIProviderDefinition(normalized.providerId);
     const apiKey =
       normalized.apiKey?.trim() || this.apiKeys.get(normalized.providerId) || "";
 
     return {
       ...normalized,
-      baseUrl: trimTrailingSlash(normalized.baseUrl || definition.defaultBaseUrl),
+      baseUrl: normalizeAIProviderBaseUrl(
+        normalized.providerId,
+        normalized.baseUrl || definition.defaultBaseUrl
+      ),
       model: normalized.model || definition.recommendedModel || "local",
       apiKey,
       apiKeyConfigured: Boolean(apiKey)

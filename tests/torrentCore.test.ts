@@ -11,15 +11,22 @@ import {
 } from "../src/features/assistant";
 import {
   AI_PROVIDER_DEFINITIONS,
+  AI_PROVIDER_IDS,
+  AI_EVENT_CHANNEL,
   DEFAULT_AI_SETTINGS,
+  type AIProviderId,
   createDefaultAIProviderConfig,
-  getAIProviderDefinition
+  getAIProviderConfig,
+  getAIProviderDefinition,
+  normalizeAIProviderBaseUrl
 } from "../electron/aiContracts";
+import { AIService } from "../electron/aiService";
 import { ASSISTANT_EVENT_NAMES } from "../electron/assistantEvents";
 import {
   type AutomationSettings,
   DOWNLOAD_PROFILE_IDS as CORE_PROFILE_IDS,
-  TORRENT_CORE_EVENT_NAMES
+  TORRENT_CORE_EVENT_NAMES,
+  normalizeRemoveTorrentRequest
 } from "../electron/torrentCore/contracts";
 import {
   evaluateRssRuleCandidates,
@@ -54,7 +61,20 @@ import {
   normalizeTorrentCategory,
   normalizeTorrentTags
 } from "../electron/torrentCore/labels";
-import { toTorrentFileInfo } from "../electron/torrentCore/webtorrentCore";
+import {
+  normalizeTorrentUrl,
+  toTorrentFileInfo
+} from "../electron/torrentCore/webtorrentCore";
+import {
+  createTorrentEventLogEntry,
+  sanitizeEventLogText,
+  trimTorrentEventLogEntries
+} from "../electron/torrentCore/eventLog";
+import {
+  accumulateTorrentTrafficSample,
+  createTorrentStatisticsCounters
+} from "../electron/torrentCore/statistics";
+import { normalizeTorrentColumns } from "../src/app/torrentColumns";
 
 describe("torrent-core contracts", () => {
   it("keeps core profile ids aligned with the assistant profile ids", () => {
@@ -74,6 +94,320 @@ describe("torrent-core contracts", () => {
       apiKeyConfigured: false
     });
     expect(JSON.stringify(DEFAULT_AI_SETTINGS)).not.toContain('"apiKey":');
+  });
+
+  it("resolves the requested AI provider and expands bare provider origins", () => {
+    const providers = DEFAULT_AI_SETTINGS.providers.map((provider) =>
+      provider.providerId === "lmstudio"
+        ? { ...provider, baseUrl: "http://127.0.0.1:1234" }
+        : provider
+    );
+
+    expect(getAIProviderConfig(providers, "lmstudio")).toMatchObject({
+      providerId: "lmstudio",
+      baseUrl: "http://127.0.0.1:1234"
+    });
+    expect(normalizeAIProviderBaseUrl("lmstudio", "http://127.0.0.1:1234")).toBe(
+      "http://127.0.0.1:1234/v1"
+    );
+    expect(normalizeAIProviderBaseUrl("openrouter", "https://openrouter.ai")).toBe(
+      "https://openrouter.ai/api/v1"
+    );
+    expect(normalizeAIProviderBaseUrl("custom", "http://127.0.0.1:9000")).toBe(
+      "http://127.0.0.1:9000"
+    );
+  });
+
+  it("routes every AI provider connection test to its configured adapter", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "storent-ai-"));
+    const service = createTestAIService(tempDir);
+    const providerEvents: AIProviderId[] = [];
+    const originalFetch = globalThis.fetch;
+    const openAICompatibleProviders: AIProviderId[] = [
+      "openai",
+      "mistral",
+      "groq",
+      "together",
+      "openrouter",
+      "lmstudio",
+      "ollama",
+      "jan",
+      "llamacpp",
+      "textgenwebui",
+      "custom"
+    ];
+    const cases = [
+      ...openAICompatibleProviders.map((providerId) => {
+        const baseUrl = createBareTestBaseUrl(providerId);
+        return {
+          providerId,
+          apiKey: shouldUseTestApiKey(providerId) ? "test-key" : undefined,
+          baseUrl,
+          expectedUrl: `${normalizeAIProviderBaseUrl(providerId, baseUrl)}/models`,
+          expectedMethod: "GET",
+          responseBody: { data: [{ id: `${providerId}-model` }] },
+          expectedModels: [`${providerId}-model`]
+        };
+      }),
+      {
+        providerId: "anthropic" as const,
+        apiKey: "test-key",
+        baseUrl: "https://api.anthropic.test",
+        expectedUrl: "https://api.anthropic.test/v1/messages",
+        expectedMethod: "POST",
+        responseBody: { content: [{ text: "ok" }] },
+        expectedModels: ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"]
+      },
+      {
+        providerId: "gemini" as const,
+        apiKey: "test-key",
+        baseUrl: "https://generativelanguage.googleapis.test",
+        expectedUrl: "https://generativelanguage.googleapis.test/v1beta/models?key=test-key",
+        expectedMethod: "GET",
+        responseBody: {
+          models: [
+            {
+              name: "models/gemini-test",
+              supportedGenerationMethods: ["generateContent"]
+            }
+          ]
+        },
+        expectedModels: ["gemini-test"]
+      },
+      {
+        providerId: "koboldcpp" as const,
+        baseUrl: "http://kobold.test",
+        expectedUrl: "http://kobold.test/api/v1/model",
+        expectedMethod: "GET",
+        responseBody: { result: "kobold-test" },
+        expectedModels: ["kobold-test"]
+      },
+      {
+        providerId: "anythingllm" as const,
+        baseUrl: "http://anythingllm.test",
+        expectedUrl: "http://anythingllm.test/api/v1/workspaces",
+        expectedMethod: "GET",
+        responseBody: { workspaces: [{ slug: "workspace-test" }] },
+        expectedModels: ["workspace-test"]
+      }
+    ];
+
+    service.on(AI_EVENT_CHANNEL, (event) => {
+      if (event.type === "ai.provider.tested") {
+        providerEvents.push(event.payload.providerId);
+      }
+    });
+
+    try {
+      for (const item of cases) {
+        const requests: Array<{
+          url: string;
+          method: string;
+          headers: Record<string, string>;
+        }> = [];
+
+        globalThis.fetch = async (input, init) => {
+          requests.push({
+            url: String(input),
+            method: init?.method ?? "GET",
+            headers: headersToObject(init?.headers)
+          });
+
+          return jsonResponse(item.responseBody);
+        };
+
+        const result = await service.testProvider({
+          ...createDefaultAIProviderConfig(item.providerId),
+          baseUrl: item.baseUrl,
+          model: `${item.providerId}-model`,
+          apiKey: item.apiKey
+        });
+
+        expect(result).toMatchObject({
+          success: true,
+          modelsList: item.expectedModels
+        });
+        expect(requests).toHaveLength(1);
+        expect(requests[0]).toMatchObject({
+          url: item.expectedUrl,
+          method: item.expectedMethod
+        });
+        expect(providerEvents.at(-1)).toBe(item.providerId);
+
+        if (item.apiKey && item.providerId === "anthropic") {
+          expect(requests[0].headers["x-api-key"]).toBe(item.apiKey);
+          expect(requests[0].headers["anthropic-version"]).toBe("2023-06-01");
+        } else if (item.apiKey && item.providerId !== "gemini") {
+          expect(requests[0].headers.authorization).toBe(`Bearer ${item.apiKey}`);
+        } else if (!item.apiKey) {
+          expect(requests[0].headers.authorization).toBeUndefined();
+        }
+
+        if (item.providerId === "openrouter") {
+          expect(requests[0].headers["http-referer"]).toBe(
+            "https://github.com/sattop/sTorrent"
+          );
+          expect(requests[0].headers["x-title"]).toBe("sTorent");
+        }
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(providerEvents).toEqual(cases.map((item) => item.providerId));
+  });
+
+  it("routes AI advice requests through every provider completion endpoint", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "storent-ai-"));
+    const service = createTestAIService(tempDir);
+    const originalFetch = globalThis.fetch;
+    const openAICompatibleProviders: AIProviderId[] = [
+      "openai",
+      "mistral",
+      "groq",
+      "together",
+      "openrouter",
+      "lmstudio",
+      "ollama",
+      "jan",
+      "llamacpp",
+      "textgenwebui",
+      "custom"
+    ];
+    const cases = [
+      ...openAICompatibleProviders.map((providerId) => {
+        const baseUrl = createBareTestBaseUrl(providerId);
+        return {
+          providerId,
+          apiKey: shouldUseTestApiKey(providerId) ? "test-key" : undefined,
+          baseUrl,
+          expectedUrl: `${normalizeAIProviderBaseUrl(
+            providerId,
+            baseUrl
+          )}/chat/completions`,
+          responseBody: { choices: [{ message: { content: "ok" } }] }
+        };
+      }),
+      {
+        providerId: "anthropic" as const,
+        apiKey: "test-key",
+        baseUrl: "https://api.anthropic.test",
+        expectedUrl: "https://api.anthropic.test/v1/messages",
+        responseBody: { content: [{ text: "ok" }] }
+      },
+      {
+        providerId: "gemini" as const,
+        apiKey: "test-key",
+        baseUrl: "https://generativelanguage.googleapis.test",
+        expectedUrl:
+          "https://generativelanguage.googleapis.test/v1beta/models/gemini-model:generateContent?key=test-key",
+        responseBody: {
+          candidates: [{ content: { parts: [{ text: "ok" }] } }]
+        },
+        model: "gemini-model"
+      },
+      {
+        providerId: "koboldcpp" as const,
+        baseUrl: "http://kobold.test",
+        expectedUrl: "http://kobold.test/api/v1/generate",
+        responseBody: { results: [{ text: "ok" }] }
+      },
+      {
+        providerId: "anythingllm" as const,
+        baseUrl: "http://anythingllm.test",
+        expectedUrl: "http://anythingllm.test/api/v1/workspace/workspace-test/chat",
+        responseBody: { textResponse: "ok" },
+        model: "workspace-test"
+      }
+    ];
+
+    try {
+      for (const item of cases) {
+        const requests: Array<{
+          url: string;
+          method: string;
+          headers: Record<string, string>;
+        }> = [];
+        const model =
+          "model" in item && item.model ? item.model : `${item.providerId}-model`;
+
+        globalThis.fetch = async (input, init) => {
+          requests.push({
+            url: String(input),
+            method: init?.method ?? "GET",
+            headers: headersToObject(init?.headers)
+          });
+
+          return jsonResponse(item.responseBody);
+        };
+
+        await service.updateSettings({
+          enabled: true,
+          activeProviderId: item.providerId,
+          providers: DEFAULT_AI_SETTINGS.providers.map((provider) =>
+            provider.providerId === item.providerId
+              ? {
+                  ...provider,
+                  baseUrl: item.baseUrl,
+                  model,
+                  apiKey: item.apiKey
+                }
+              : provider
+          )
+        });
+
+        const result = await service.requestAdvice({
+          contextType: "sda",
+          context: createTestAIAdviceContext()
+        });
+
+        expect(result).toMatchObject({
+          text: "ok",
+          providerUsed: item.providerId,
+          modelUsed: model,
+          fallback: false
+        });
+        expect(requests).toHaveLength(1);
+        expect(requests[0]).toMatchObject({
+          url: item.expectedUrl,
+          method: "POST"
+        });
+
+        if (item.apiKey && item.providerId === "anthropic") {
+          expect(requests[0].headers["x-api-key"]).toBe(item.apiKey);
+        } else if (item.apiKey && item.providerId !== "gemini") {
+          expect(requests[0].headers.authorization).toBe(`Bearer ${item.apiKey}`);
+        } else if (!item.apiKey) {
+          expect(requests[0].headers.authorization).toBeUndefined();
+        }
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("keeps the AI provider matrix covered by adapter contract tests", () => {
+    const coveredProviderIds = new Set<AIProviderId>([
+      "anthropic",
+      "openai",
+      "gemini",
+      "mistral",
+      "groq",
+      "together",
+      "openrouter",
+      "lmstudio",
+      "ollama",
+      "jan",
+      "llamacpp",
+      "textgenwebui",
+      "koboldcpp",
+      "anythingllm",
+      "custom"
+    ]);
+
+    expect(AI_PROVIDER_IDS).toHaveLength(coveredProviderIds.size);
+    expect(AI_PROVIDER_IDS.every((providerId) => coveredProviderIds.has(providerId)))
+      .toBe(true);
   });
 
   it("computes assistant health score and exposes it in recommendations", () => {
@@ -183,6 +517,77 @@ describe("torrent-core contracts", () => {
       priority: "normal",
       selected: true
     });
+  });
+
+  it("keeps destructive removal opt-in at the contract boundary", () => {
+    expect(normalizeRemoveTorrentRequest("abc123")).toEqual({
+      id: "abc123",
+      deleteData: false
+    });
+    expect(
+      normalizeRemoveTorrentRequest({ id: "abc123", deleteData: true })
+    ).toEqual({
+      id: "abc123",
+      deleteData: true
+    });
+  });
+
+  it("validates .torrent URLs before fetching", () => {
+    expect(normalizeTorrentUrl("https://example.test/file.torrent#ignored")).toBe(
+      "https://example.test/file.torrent"
+    );
+    expect(() => normalizeTorrentUrl("ftp://example.test/file.torrent")).toThrow(
+      /HTTP/
+    );
+    expect(() => normalizeTorrentUrl("https://example.test/file.txt")).toThrow(
+      /\.torrent/
+    );
+  });
+
+  it("redacts and caps event logs", () => {
+    const entry = createTorrentEventLogEntry(
+      {
+        type: "torrent.error",
+        payload: {
+          id: "abc123",
+          message:
+            "announce failed: https://tracker.example/passkey/secret?passkey=secret"
+        }
+      },
+      { id: "log-1", timestamp: "2026-01-01T00:00:00.000Z" }
+    );
+
+    expect(entry).toMatchObject({
+      level: "error",
+      torrentId: "abc123"
+    });
+    expect(entry?.message).not.toContain("secret");
+    expect(sanitizeEventLogText("magnet:?xt=urn:btih:abc")).toBe("[magnet]");
+    expect(trimTorrentEventLogEntries([entry!, entry!], 1)).toHaveLength(1);
+  });
+
+  it("accumulates approximate traffic statistics from speed samples", () => {
+    const counters = createTorrentStatisticsCounters("2026-01-01T00:00:00.000Z");
+    const next = accumulateTorrentTrafficSample(counters, {
+      downloadSpeedBytes: 1024,
+      uploadSpeedBytes: 256,
+      elapsedSeconds: 2,
+      sampledAt: "2026-01-01T00:00:02.000Z"
+    });
+
+    expect(next).toMatchObject({
+      downloadedBytes: 2048,
+      uploadedBytes: 512,
+      updatedAt: "2026-01-01T00:00:02.000Z"
+    });
+  });
+
+  it("normalizes torrent column preferences", () => {
+    expect(normalizeTorrentColumns(["status", "status", "bad", "eta"])).toEqual([
+      "status",
+      "eta"
+    ]);
+    expect(normalizeTorrentColumns([])).toContain("progress");
   });
 
   it("normalizes stage 4 network settings and applies global speed limits", () => {
@@ -717,6 +1122,8 @@ describe("torrent-core contracts", () => {
       });
     const core: RemoteAccessCore = {
       addMagnet: async () => torrent,
+      addTorrentUrl: async () => ({ ...torrent, sourceType: "torrent_url" }),
+      getMagnetUri: (id) => `magnet:?xt=urn:btih:${id}`,
       pause: (id) => {
         calls.push(`pause:${id}`);
         return { ...torrent, id, status: "paused" };
@@ -751,6 +1158,21 @@ describe("torrent-core contracts", () => {
         torrents: [torrent],
         downloadSpeedBytes: 0,
         uploadSpeedBytes: 0
+      }),
+      getStatistics: () => ({
+        session: createTorrentStatisticsCounters("2026-01-01T00:00:00.000Z"),
+        allTime: createTorrentStatisticsCounters("2026-01-01T00:00:00.000Z"),
+        current: {
+          torrentCount: 1,
+          activeTorrentCount: 1,
+          downloadSpeedBytes: 0,
+          uploadSpeedBytes: 0
+        }
+      }),
+      getEventLogs: () => [],
+      exportEventLogs: async () => ({
+        logPath: path.join(tempDir, "event-log.json"),
+        entries: []
       }),
       getNetworkSettingsState: () => ({
         settings: DEFAULT_NETWORK_SETTINGS,
@@ -840,6 +1262,19 @@ describe("torrent-core contracts", () => {
         }
       });
 
+      const magnet = await fetch(
+        `${state.runtime.origin}/api/torrents/${torrent.id}/magnet`,
+        {
+          headers: { Authorization: "Bearer correct horse" }
+        }
+      );
+      const magnetResult = await magnet.json();
+
+      expect(magnetResult).toMatchObject({
+        ok: true,
+        value: `magnet:?xt=urn:btih:${torrent.id}`
+      });
+
       const pause = await fetch(
         `${state.runtime.origin}/api/torrents/${torrent.id}/pause`,
         {
@@ -878,6 +1313,76 @@ describe("torrent-core contracts", () => {
     }
   });
 });
+
+function createTestAIService(tempDir: string) {
+  return new AIService({
+    settingsFilePath: path.join(tempDir, "ai-settings.json"),
+    keysFilePath: path.join(tempDir, "ai-keys.json")
+  });
+}
+
+function createBareTestBaseUrl(providerId: AIProviderId) {
+  if (providerId === "custom") {
+    return "https://custom.test/v1";
+  }
+
+  return new URL(getAIProviderDefinition(providerId).defaultBaseUrl).origin;
+}
+
+function shouldUseTestApiKey(providerId: AIProviderId) {
+  return getAIProviderDefinition(providerId).requiresApiKey || providerId === "custom";
+}
+
+function jsonResponse(body: unknown) {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+
+function headersToObject(headers: HeadersInit | undefined) {
+  if (!headers) {
+    return {};
+  }
+
+  if (headers instanceof Headers) {
+    return Object.fromEntries(
+      Array.from(headers.entries()).map(([key, value]) => [
+        key.toLowerCase(),
+        value
+      ])
+    );
+  }
+
+  if (Array.isArray(headers)) {
+    return Object.fromEntries(
+      headers.map(([key, value]) => [key.toLowerCase(), String(value)])
+    );
+  }
+
+  return Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [
+      key.toLowerCase(),
+      String(value)
+    ])
+  );
+}
+
+function createTestAIAdviceContext() {
+  return {
+    healthScore: 80,
+    seeders: 20,
+    leechers: 3,
+    totalSizeGb: 1.5,
+    fileCategory: "video",
+    freeDiskGb: 100,
+    currentSpeedKb: 2048,
+    avgSpeedKb: 1800,
+    hourOfDay: 12,
+    anomalies: [],
+    suggestedProfile: "manual"
+  };
+}
 
 async function getFreePort() {
   const server = net.createServer();

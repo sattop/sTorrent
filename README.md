@@ -10,11 +10,11 @@ The project is currently an MVP. Core torrent operations work, Windows builds ar
 
 ## Download
 
-Latest release: [sTorent v0.1.1](https://github.com/sattop/sTorrent/releases/tag/v0.1.1)
+Latest release: [sTorent v0.1.4](https://github.com/sattop/sTorrent/releases/tag/v0.1.4)
 
 Download the Windows installer:
 
-[sTorent-Setup.exe](https://github.com/sattop/sTorrent/releases/download/v0.1.1/sTorent-Setup.exe)
+[sTorent-Setup.exe](https://github.com/sattop/sTorrent/releases/download/v0.1.4/sTorent-Setup.exe)
 
 The release also includes `latest.yml`, the installer blockmap, and `SHA256SUMS.txt` for update metadata and checksum verification.
 

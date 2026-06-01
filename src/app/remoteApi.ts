@@ -1,18 +1,24 @@
 import type {
   AddMagnetRequest,
   AddTorrentFileRequest,
+  AddTorrentUrlRequest,
   AutomationSettings,
   AutomationSettingsState,
   NetworkDiagnosticsReport,
   NetworkSettings,
   NetworkSettingsState,
+  OpenTorrentFileRequest,
+  RemoveTorrentRequest,
   SetTorrentFilePriorityRequest,
   SpeedDoctorHistorySummary,
   SpeedDoctorPortCheckResult,
   SpeedDoctorReportExport,
   TorrentCoreEvent,
   TorrentCoreResult,
+  TorrentEventLogEntry,
+  TorrentEventLogExport,
   TorrentCoreSnapshot,
+  TorrentStatistics,
   TorrentSpeedDoctorReport,
   TorrentSummary,
   UpdateTorrentLabelsRequest,
@@ -46,6 +52,11 @@ export function createRemoteTorrentApi(getPassword: () => string): TorrentApi {
           message: ".torrent file selection is available only in the desktop app."
         }
       }),
+    addTorrentUrl: (request: AddTorrentUrlRequest) =>
+      apiRequest<TorrentSummary>("/api/torrents/url", getPassword, {
+        method: "POST",
+        body: JSON.stringify(request)
+      }),
     addMagnet: (request: AddMagnetRequest) =>
       apiRequest<TorrentSummary>("/api/torrents/magnet", getPassword, {
         method: "POST",
@@ -63,18 +74,81 @@ export function createRemoteTorrentApi(getPassword: () => string): TorrentApi {
         getPassword,
         { method: "POST" }
       ),
-    remove: (id: string) =>
-      apiRequest<TorrentCoreSnapshot>(
-        `/api/torrents/${encodeURIComponent(id)}`,
+    remove: (request: string | RemoveTorrentRequest) => {
+      const normalized =
+        typeof request === "string" ? { id: request, deleteData: false } : request;
+
+      if (normalized.deleteData) {
+        return Promise.resolve({
+          ok: false,
+          error: {
+            code: "unsupported_remote_delete_data",
+            message: "Deleting downloaded data is available only in the desktop app."
+          }
+        }) as Promise<TorrentCoreResult<TorrentCoreSnapshot>>;
+      }
+
+      return apiRequest<TorrentCoreSnapshot>(
+        `/api/torrents/${encodeURIComponent(normalized.id)}`,
         getPassword,
         { method: "DELETE" }
-      ),
+      );
+    },
     recheck: (id: string) =>
       apiRequest<TorrentSummary>(
         `/api/torrents/${encodeURIComponent(id)}/recheck`,
         getPassword,
         { method: "POST" }
       ),
+    copyMagnet: async (id: string) => {
+      const result = await apiRequest<string>(
+        `/api/torrents/${encodeURIComponent(id)}/magnet`,
+        getPassword
+      );
+
+      if (!result.ok) {
+        return result;
+      }
+
+      if (!navigator.clipboard?.writeText) {
+        return {
+          ok: false,
+          error: {
+            code: "clipboard_unavailable",
+            message: "Clipboard access is unavailable in this browser context."
+          }
+        };
+      }
+
+      try {
+        await navigator.clipboard.writeText(result.value);
+        return result;
+      } catch (error) {
+        return {
+          ok: false,
+          error: {
+            code: "clipboard_write_failed",
+            message: getErrorMessage(error)
+          }
+        };
+      }
+    },
+    openTorrentFolder: (_id: string) =>
+      Promise.resolve({
+        ok: false,
+        error: {
+          code: "unsupported_remote_os_open",
+          message: "Opening folders is available only in the desktop app."
+        }
+      }) as Promise<TorrentCoreResult<true>>,
+    openTorrentFile: (_request: OpenTorrentFileRequest) =>
+      Promise.resolve({
+        ok: false,
+        error: {
+          code: "unsupported_remote_os_open",
+          message: "Opening files is available only in the desktop app."
+        }
+      }) as Promise<TorrentCoreResult<true>>,
     updateLabels: (request: UpdateTorrentLabelsRequest) => {
       const { id, ...body } = request;
       return apiRequest<TorrentSummary>(
@@ -110,6 +184,14 @@ export function createRemoteTorrentApi(getPassword: () => string): TorrentApi {
     },
     getSnapshot: () =>
       apiRequest<TorrentCoreSnapshot>("/api/snapshot", getPassword),
+    getStatistics: () =>
+      apiRequest<TorrentStatistics>("/api/statistics", getPassword),
+    getEventLogs: () =>
+      apiRequest<TorrentEventLogEntry[]>("/api/event-logs", getPassword),
+    exportEventLogs: () =>
+      apiRequest<TorrentEventLogExport>("/api/event-logs/export", getPassword, {
+        method: "POST"
+      }),
     getNetworkSettings: () =>
       apiRequest<NetworkSettingsState>("/api/network-settings", getPassword),
     updateNetworkSettings: (request: NetworkSettings) =>
@@ -161,8 +243,13 @@ export function createRemoteTorrentApi(getPassword: () => string): TorrentApi {
       apiRequest<WatchFolderScanResult>("/api/watch-folders/scan", getPassword, {
         method: "POST"
       }),
+    getDroppedTorrentFilePaths: () => [],
     onEvent: (_listener: (event: TorrentCoreEvent) => void) => () => {}
   };
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function apiRequest<T>(

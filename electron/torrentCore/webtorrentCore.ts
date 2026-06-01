@@ -11,6 +11,7 @@ import WebTorrent, {
 import {
   type AddMagnetRequest,
   type AddTorrentFileRequest,
+  type AddTorrentUrlRequest,
   type AssistantProfileApplyRequest,
   type AssistantScheduleSuggestion,
   type AssistantState,
@@ -22,6 +23,9 @@ import {
   type NetworkInterfaceInfo,
   type NetworkSettings,
   type NetworkSettingsState,
+  normalizeRemoveTorrentRequest,
+  type OpenTorrentFileRequest,
+  type RemoveTorrentRequest,
   type SetTorrentFilePriorityRequest,
   type SpeedDoctorScanMode,
   type SpeedDoctorPortCheckResult,
@@ -30,8 +34,12 @@ import {
   type TorrentFilePriority,
   type TorrentFileInfo,
   type TorrentCoreEvent,
+  type TorrentEventLogEntry,
+  type TorrentEventLogExport,
   type TorrentCoreEventPayloadMap,
   type TorrentCoreSnapshot,
+  type TorrentStatistics,
+  type TorrentStatisticsCounters,
   type TorrentSourceType,
   type TorrentStatus,
   type TorrentSummary,
@@ -40,6 +48,11 @@ import {
   type UpdateTorrentLabelsRequest,
   type UpdateTorrentProfileRequest
 } from "./contracts.js";
+import {
+  createTorrentEventLogEntry,
+  normalizeTorrentEventLogEntries,
+  trimTorrentEventLogEntries
+} from "./eventLog.js";
 import { AssistantStateStore } from "./assistantState.js";
 import {
   AUTOMATION_CAPABILITIES,
@@ -68,8 +81,16 @@ import {
   type SpeedDoctorDiskInput
 } from "./speedDoctor.js";
 import { SpeedHistoryStore } from "./speedHistory.js";
+import {
+  TORRENT_STATISTICS_VERSION,
+  accumulateTorrentTrafficSample,
+  createTorrentStatisticsCounters,
+  normalizePersistedTorrentStatistics,
+  type PersistedTorrentStatistics
+} from "./statistics.js";
 
 const FULL_SCAN_EXTERNAL_PORT_TIMEOUT_MS = 10_000;
+export const MAX_TORRENT_URL_BYTES = 10 * 1024 * 1024;
 
 type PersistedTorrentSource =
   | {
@@ -79,6 +100,11 @@ type PersistedTorrentSource =
   | {
       type: "magnet";
       magnetUri: string;
+    }
+  | {
+      type: "torrent_url";
+      url: string;
+      cachedFilePath: string;
     };
 
 interface PersistedTorrentRecord {
@@ -94,7 +120,7 @@ interface PersistedTorrentRecord {
 }
 
 interface PersistedTorrentState {
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   torrents: PersistedTorrentRecord[];
 }
 
@@ -126,6 +152,10 @@ export interface WebTorrentCoreOptions {
   networkSettingsFilePath: string;
   automationSettingsFilePath: string;
   speedHistoryFilePath: string;
+  statisticsFilePath: string;
+  eventLogFilePath: string;
+  eventLogExportDirectoryPath: string;
+  torrentCacheDirectoryPath: string;
   assistantProfileUsageFilePath: string;
   assistantWarningDismissedFilePath: string;
   speedDoctorReportDirectoryPath: string;
@@ -144,12 +174,22 @@ export class WebTorrentCore extends EventEmitter {
   private activeSpeedScheduleId: string | null = null;
   private readonly speedHistory = new SpeedHistoryStore();
   private readonly assistantState: AssistantStateStore;
+  private readonly sessionStats: TorrentStatisticsCounters;
+  private allTimeStats: TorrentStatisticsCounters;
+  private eventLogEntries: TorrentEventLogEntry[] = [];
   private lastSpeedHistorySampleAt = 0;
+  private lastStatsSampleAt = Date.now();
+  private lastStatsPersistAt = 0;
   private speedHistoryDirty = false;
+  private statisticsDirty = false;
+  private eventLogDirty = false;
 
   constructor(private readonly options: WebTorrentCoreOptions) {
     super();
 
+    const startedAt = new Date().toISOString();
+    this.sessionStats = createTorrentStatisticsCounters(startedAt);
+    this.allTimeStats = createTorrentStatisticsCounters(startedAt);
     this.assistantState = new AssistantStateStore({
       profileUsageFilePath: options.assistantProfileUsageFilePath,
       warningDismissedFilePath: options.assistantWarningDismissedFilePath
@@ -161,6 +201,7 @@ export class WebTorrentCore extends EventEmitter {
         this.updateRuntimeStats(record);
         this.emitCore("torrent.progress.updated", this.toSummary(record));
       }
+      this.recordStatisticsSample();
       this.recordSpeedHistorySample(false);
     }, 1_000);
     this.progressTimer.unref();
@@ -233,6 +274,38 @@ export class WebTorrentCore extends EventEmitter {
     }
   }
 
+  async restoreStatistics() {
+    try {
+      const persisted = JSON.parse(
+        await fs.readFile(this.options.statisticsFilePath, "utf8")
+      ) as Partial<PersistedTorrentStatistics>;
+      this.allTimeStats = normalizePersistedTorrentStatistics(persisted).allTime;
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") {
+        this.emitCore("torrent.error", {
+          id: null,
+          message: getErrorMessage(error)
+        });
+      }
+    }
+  }
+
+  async restoreEventLog() {
+    try {
+      const persisted = JSON.parse(
+        await fs.readFile(this.options.eventLogFilePath, "utf8")
+      ) as { entries?: unknown };
+      this.eventLogEntries = normalizeTorrentEventLogEntries(persisted.entries);
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") {
+        this.emitCore("torrent.error", {
+          id: null,
+          message: getErrorMessage(error)
+        });
+      }
+    }
+  }
+
   async restoreAssistantState() {
     try {
       await this.assistantState.restore();
@@ -264,7 +337,7 @@ export class WebTorrentCore extends EventEmitter {
     }
 
     if (
-      ![1, 2, 3].includes(persistedState.version) ||
+      ![1, 2, 3, 4].includes(persistedState.version) ||
       !Array.isArray(persistedState.torrents)
     ) {
       return;
@@ -286,6 +359,8 @@ export class WebTorrentCore extends EventEmitter {
             magnetUri: record.source.magnetUri,
             ...restoredOptions
           });
+        } else if (record.source.type === "torrent_url") {
+          await this.restoreTorrentUrl(record.source, restoredOptions);
         } else {
           await this.addTorrentFile({
             filePath: record.source.filePath,
@@ -518,6 +593,18 @@ export class WebTorrentCore extends EventEmitter {
     }, request);
   }
 
+  async addTorrentUrl(request: AddTorrentUrlRequest) {
+    const url = normalizeTorrentUrl(request.url);
+    const torrentFile = await fetchTorrentFile(url);
+    const cachedFilePath = await this.cacheTorrentUrlFile(url, torrentFile);
+
+    return this.addTorrentInput(torrentFile, {
+      type: "torrent_url",
+      url,
+      cachedFilePath
+    }, request);
+  }
+
   async addMagnet(request: AddMagnetRequest) {
     if (!request.magnetUri.startsWith("magnet:?")) {
       throw new Error("A valid magnet URI is required.");
@@ -549,21 +636,33 @@ export class WebTorrentCore extends EventEmitter {
     return this.toSummary(record);
   }
 
-  async remove(id: string) {
-    const record = this.getRecord(id);
+  async remove(request: string | RemoveTorrentRequest) {
+    const normalized = normalizeRemoveTorrentRequest(request);
+    const record = this.getRecord(normalized.id);
+    const summary = this.toSummary(record);
 
     await new Promise<void>((resolve, reject) => {
-      void this.client.remove(record.torrent, { destroyStore: false }, (error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
+      void this.client.remove(
+        record.torrent,
+        { destroyStore: normalized.deleteData },
+        (error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
 
-        resolve();
-      });
+          resolve();
+        }
+      );
     });
 
     this.records.delete(record.id);
+    this.recordTorrentRemoved(normalized.deleteData);
+    this.emitCore("torrent.removed", {
+      id: summary.id,
+      name: summary.name,
+      deleteData: normalized.deleteData
+    });
     void this.persistState();
     return this.getSnapshot();
   }
@@ -651,6 +750,40 @@ export class WebTorrentCore extends EventEmitter {
     return summary;
   }
 
+  getMagnetUri(id: string) {
+    const record = this.getRecord(id);
+    const magnetUri = record.torrent.magnetURI || createMagnetUri(record);
+
+    if (!magnetUri) {
+      throw new Error("Magnet link is not available yet.");
+    }
+
+    return magnetUri;
+  }
+
+  getTorrentFolderPath(id: string) {
+    const record = this.getRecord(id);
+    return record.torrent.path || record.downloadPath;
+  }
+
+  getTorrentFilePath(request: OpenTorrentFileRequest) {
+    const record = this.getRecord(request.id);
+    const file = record.torrent.files[request.fileIndex];
+
+    if (!file) {
+      throw new Error(`Torrent file not found: ${request.fileIndex}`);
+    }
+
+    const basePath = path.resolve(record.torrent.path || record.downloadPath);
+    const filePath = path.resolve(basePath, file.path || file.name);
+
+    if (!isPathInside(basePath, filePath)) {
+      throw new Error("Torrent file path is outside the download folder.");
+    }
+
+    return filePath;
+  }
+
   getSnapshot(): TorrentCoreSnapshot {
     return {
       torrents: [...this.records.values()].map((record) =>
@@ -658,6 +791,49 @@ export class WebTorrentCore extends EventEmitter {
       ),
       downloadSpeedBytes: this.client.downloadSpeed,
       uploadSpeedBytes: this.client.uploadSpeed
+    };
+  }
+
+  getStatistics(): TorrentStatistics {
+    const snapshot = this.getSnapshot();
+
+    return {
+      session: { ...this.sessionStats },
+      allTime: { ...this.allTimeStats },
+      current: {
+        torrentCount: snapshot.torrents.length,
+        activeTorrentCount: snapshot.torrents.filter(
+          (torrent) =>
+            torrent.status === "downloading" || torrent.status === "seeding"
+        ).length,
+        downloadSpeedBytes: snapshot.downloadSpeedBytes,
+        uploadSpeedBytes: snapshot.uploadSpeedBytes
+      }
+    };
+  }
+
+  getEventLogs() {
+    return [...this.eventLogEntries].reverse();
+  }
+
+  async exportEventLogs(): Promise<TorrentEventLogExport> {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const logPath = path.join(
+      this.options.eventLogExportDirectoryPath,
+      `event-log-${stamp}.json`
+    );
+    const entries = this.getEventLogs();
+
+    await fs.mkdir(path.dirname(logPath), { recursive: true });
+    await fs.writeFile(
+      logPath,
+      `${JSON.stringify({ exportedAt: new Date().toISOString(), entries }, null, 2)}\n`,
+      "utf8"
+    );
+
+    return {
+      logPath,
+      entries
     };
   }
 
@@ -673,8 +849,44 @@ export class WebTorrentCore extends EventEmitter {
     if (this.speedHistoryDirty) {
       void this.persistSpeedHistory();
     }
+    if (this.statisticsDirty) {
+      void this.persistStatistics();
+    }
+    if (this.eventLogDirty) {
+      void this.persistEventLog();
+    }
     this.speedHistory.close();
     this.client.destroy();
+  }
+
+  private async restoreTorrentUrl(
+    source: Extract<PersistedTorrentSource, { type: "torrent_url" }>,
+    request: AddTorrentFileRequest | AddMagnetRequest | AddTorrentUrlRequest
+  ) {
+    try {
+      const torrentFile = await fs.readFile(source.cachedFilePath);
+      return this.addTorrentInput(torrentFile, source, request);
+    } catch {
+      return this.addTorrentUrl({
+        ...request,
+        url: source.url
+      });
+    }
+  }
+
+  private async cacheTorrentUrlFile(url: string, torrentFile: Buffer) {
+    const parsedUrl = new URL(url);
+    const name = sanitizeFileName(
+      path.basename(parsedUrl.pathname) || parsedUrl.host || "torrent"
+    );
+    const cachedFilePath = path.join(
+      this.options.torrentCacheDirectoryPath,
+      `${Date.now().toString(36)}-${name}.torrent`
+    );
+
+    await fs.mkdir(path.dirname(cachedFilePath), { recursive: true });
+    await fs.writeFile(cachedFilePath, torrentFile);
+    return cachedFilePath;
   }
 
   private async addTorrentInput(
@@ -753,6 +965,7 @@ export class WebTorrentCore extends EventEmitter {
           torrentId: summary.id,
           source: "add_dialog"
         });
+        this.recordTorrentAdded();
         this.emitAssistantHealth(summary);
         this.emitAssistantScheduleSuggestion(summary.id);
         void this.persistState();
@@ -795,6 +1008,7 @@ export class WebTorrentCore extends EventEmitter {
     torrent.on("done", () => {
       record.statusOverride = "completed";
       record.lastActivityAt = new Date().toISOString();
+      this.recordTorrentCompleted();
       this.emitCore("torrent.completed", this.toSummary(record));
       this.emitStatus(record);
       void this.persistState();
@@ -1139,6 +1353,118 @@ export class WebTorrentCore extends EventEmitter {
     }
   }
 
+  private recordStatisticsSample() {
+    const now = Date.now();
+    const elapsedSeconds = (now - this.lastStatsSampleAt) / 1_000;
+
+    if (elapsedSeconds <= 0) {
+      return;
+    }
+
+    this.lastStatsSampleAt = now;
+    const sample = {
+      downloadSpeedBytes: toNonNegativeNumber(this.client.downloadSpeed),
+      uploadSpeedBytes: toNonNegativeNumber(this.client.uploadSpeed),
+      elapsedSeconds,
+      sampledAt: new Date(now).toISOString()
+    };
+    const session = accumulateTorrentTrafficSample(this.sessionStats, sample);
+    const allTime = accumulateTorrentTrafficSample(this.allTimeStats, sample);
+
+    Object.assign(this.sessionStats, session);
+    this.allTimeStats = allTime;
+    this.statisticsDirty = true;
+
+    if (now - this.lastStatsPersistAt >= 15_000) {
+      void this.persistStatistics();
+    }
+  }
+
+  private recordTorrentAdded() {
+    this.sessionStats.torrentsAdded += 1;
+    this.allTimeStats.torrentsAdded += 1;
+    this.touchStatistics();
+  }
+
+  private recordTorrentCompleted() {
+    this.sessionStats.torrentsCompleted += 1;
+    this.allTimeStats.torrentsCompleted += 1;
+    this.touchStatistics();
+  }
+
+  private recordTorrentRemoved(deleteData: boolean) {
+    void deleteData;
+    this.sessionStats.torrentsRemoved += 1;
+    this.allTimeStats.torrentsRemoved += 1;
+    this.touchStatistics();
+  }
+
+  private touchStatistics() {
+    const updatedAt = new Date().toISOString();
+    this.sessionStats.updatedAt = updatedAt;
+    this.allTimeStats.updatedAt = updatedAt;
+    this.statisticsDirty = true;
+    void this.persistStatistics();
+  }
+
+  private async persistStatistics() {
+    try {
+      const state: PersistedTorrentStatistics = {
+        version: TORRENT_STATISTICS_VERSION,
+        allTime: this.allTimeStats
+      };
+
+      await fs.mkdir(path.dirname(this.options.statisticsFilePath), {
+        recursive: true
+      });
+      await fs.writeFile(
+        this.options.statisticsFilePath,
+        `${JSON.stringify(state, null, 2)}\n`,
+        "utf8"
+      );
+      this.lastStatsPersistAt = Date.now();
+      this.statisticsDirty = false;
+    } catch (error) {
+      this.emitCore("torrent.error", {
+        id: null,
+        message: getErrorMessage(error)
+      });
+    }
+  }
+
+  private recordEventLog(event: TorrentCoreEvent) {
+    const entry = createTorrentEventLogEntry(event, {
+      id: randomUUID()
+    });
+
+    if (!entry) {
+      return;
+    }
+
+    this.eventLogEntries = trimTorrentEventLogEntries([
+      ...this.eventLogEntries,
+      entry
+    ]);
+    this.eventLogDirty = true;
+    void this.persistEventLog();
+  }
+
+  private async persistEventLog() {
+    try {
+      await fs.mkdir(path.dirname(this.options.eventLogFilePath), {
+        recursive: true
+      });
+      await fs.writeFile(
+        this.options.eventLogFilePath,
+        `${JSON.stringify({ entries: this.eventLogEntries }, null, 2)}\n`,
+        "utf8"
+      );
+      this.eventLogDirty = false;
+    } catch {
+      this.eventLogDirty = true;
+    }
+  }
+
   private createClient(settings: NetworkSettings) {
     const client = new WebTorrent(buildWebTorrentClientOptions(settings));
 
@@ -1419,6 +1745,7 @@ export class WebTorrentCore extends EventEmitter {
     payload: TorrentCoreEventPayloadMap[EventName]
   ) {
     const event: TorrentCoreEvent = { type, payload } as TorrentCoreEvent;
+    this.recordEventLog(event);
     this.emit("core-event", event);
   }
 
@@ -1434,7 +1761,7 @@ export class WebTorrentCore extends EventEmitter {
 
   private async persistState() {
     const state: PersistedTorrentState = {
-      version: 3,
+      version: 4,
       torrents: [...this.records.values()].map((record) => ({
         source: record.source,
         downloadPath: record.downloadPath,
@@ -1638,7 +1965,40 @@ function getSourceDisplayName(source: PersistedTorrentSource) {
     return path.basename(source.filePath);
   }
 
+  if (source.type === "torrent_url") {
+    try {
+      const url = new URL(source.url);
+      return path.basename(url.pathname) || url.host;
+    } catch {
+      return source.url.slice(0, 40);
+    }
+  }
+
   return source.magnetUri.slice(0, 40);
+}
+
+function createMagnetUri(record: TorrentRecord) {
+  const infoHash = record.torrent.infoHash;
+
+  if (!infoHash) {
+    return null;
+  }
+
+  const params = new URLSearchParams({
+    xt: `urn:btih:${infoHash}`
+  });
+  const name = record.torrent.name || getSourceDisplayName(record.source);
+
+  if (name) {
+    params.set("dn", name);
+  }
+
+  return `magnet:?${params.toString()}`;
+}
+
+function isPathInside(basePath: string, candidatePath: string) {
+  const relative = path.relative(basePath, candidatePath);
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 function normalizeFilePriorities(
@@ -1786,6 +2146,73 @@ async function probeIncomingPort(
   });
 }
 
+export function normalizeTorrentUrl(value: string) {
+  let url: URL;
+
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw createCodedError("invalid_torrent_url", "A valid .torrent URL is required.");
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw createCodedError(
+      "invalid_torrent_url",
+      "Only HTTP and HTTPS .torrent URLs are supported."
+    );
+  }
+
+  if (!url.pathname.toLowerCase().endsWith(".torrent")) {
+    throw createCodedError(
+      "invalid_torrent_url",
+      "The URL must point to a .torrent file."
+    );
+  }
+
+  url.hash = "";
+  return url.toString();
+}
+
+async function fetchTorrentFile(url: string) {
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/x-bittorrent, application/octet-stream, */*"
+    }
+  });
+
+  if (!response.ok) {
+    throw createCodedError(
+      "torrent_url_fetch_failed",
+      `Failed to download .torrent file: HTTP ${response.status}.`
+    );
+  }
+
+  const contentLength = response.headers.get("content-length");
+  const expectedBytes = contentLength === null ? null : Number(contentLength);
+
+  if (
+    expectedBytes !== null &&
+    Number.isFinite(expectedBytes) &&
+    expectedBytes > MAX_TORRENT_URL_BYTES
+  ) {
+    throw createCodedError(
+      "torrent_url_too_large",
+      "The .torrent file is larger than the supported limit."
+    );
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+
+  if (buffer.byteLength > MAX_TORRENT_URL_BYTES) {
+    throw createCodedError(
+      "torrent_url_too_large",
+      "The .torrent file is larger than the supported limit."
+    );
+  }
+
+  return buffer;
+}
+
 async function probeExternalPort(
   port: number,
   timeoutMs = 2_500
@@ -1926,6 +2353,12 @@ function sanitizeFileName(value: string) {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function createCodedError(code: string, message: string) {
+  const error = new Error(message);
+  (error as Error & { code: string }).code = code;
+  return error;
 }
 
 function isTrackerRelatedMessage(message: string) {

@@ -2,6 +2,20 @@
 
 All notable changes to sTorent are documented in this file.
 
+## [0.1.4] - 2026-06-01
+
+### Added
+
+- Windows desktop integration for `.torrent` file association, `magnet:` links, double-click/open-with flows, single-instance handoff, system tray, close-to-tray, minimized startup, Windows autostart, splash screen, and native notifications.
+- Desktop integration settings for default handlers, tray behavior, Windows login startup, minimized startup, and notification event controls.
+- Torrent event/statistics foundations, table column controls, and automated coverage for startup argument parsing, integration settings, login item arguments, and torrent statistics.
+
+### Changed
+
+- Routed external `.torrent` and `magnet:` opens through the existing torrent core and preload IPC contracts.
+- Expanded remote/API/UI contracts, localization, and torrent core coverage for the updated desktop workflow.
+- Updated the Vitest toolchain to remove a critical development dependency audit finding before release.
+
 ## [0.1.3] - 2026-05-31
 
 ### Added

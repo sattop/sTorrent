@@ -1,6 +1,6 @@
 {
   "name": "storent",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "A modern desktop BitTorrent client with Smart Download Assistant and Speed Doctor.",
   "author": "sTorent contributors",
   "license": "MIT",
@@ -44,7 +44,7 @@
     "react-dom": "^19.0.0",
     "typescript": "^5.8.0",
     "vite": "^7.0.0",
-    "vitest": "^3.1.0"
+    "vitest": "^4.1.8"
   },
   "build": {
     "appId": "app.storent.desktop",
@@ -61,6 +61,15 @@
         "filter": [
           "icon.ico"
         ]
+      }
+    ],
+    "fileAssociations": [
+      {
+        "ext": "torrent",
+        "name": "sTorent.torrent",
+        "description": "BitTorrent metadata file",
+        "icon": "assets/icon.ico",
+        "role": "Viewer"
       }
     ],
     "afterPack": "scripts/after-pack.mjs",

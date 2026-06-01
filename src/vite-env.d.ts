@@ -13,8 +13,14 @@ import type {
 import type { AssistantEvent } from "../electron/assistantEvents";
 import type { AppUpdateEvent, AppUpdateState } from "../electron/appUpdateContracts";
 import type {
+  AppIntegrationEvent,
+  AppIntegrationSettings,
+  AppIntegrationState
+} from "../electron/appIntegrationContracts";
+import type {
   AddMagnetRequest,
   AddTorrentFileRequest,
+  AddTorrentUrlRequest,
   AssistantProfileApplyRequest,
   AssistantScheduleSuggestion,
   AssistantState,
@@ -24,8 +30,10 @@ import type {
   NetworkDiagnosticsReport,
   NetworkSettings,
   NetworkSettingsState,
+  OpenTorrentFileRequest,
   RemoteAccessSettings,
   RemoteAccessSettingsState,
+  RemoveTorrentRequest,
   SetTorrentFilePriorityRequest,
   SpeedDoctorHistorySummary,
   SpeedDoctorPortCheckResult,
@@ -33,7 +41,10 @@ import type {
   SpeedDoctorScanMode,
   TorrentCoreEvent,
   TorrentCoreResult,
+  TorrentEventLogEntry,
+  TorrentEventLogExport,
   TorrentCoreSnapshot,
+  TorrentStatistics,
   TorrentSpeedDoctorReport,
   TorrentSummary,
   UpdateTorrentLabelsRequest,
@@ -50,13 +61,23 @@ declare global {
         addTorrentFile(
           request?: AddTorrentFileRequest
         ): Promise<TorrentCoreResult<TorrentSummary>>;
+        addTorrentUrl(
+          request: AddTorrentUrlRequest
+        ): Promise<TorrentCoreResult<TorrentSummary>>;
         addMagnet(
           request: AddMagnetRequest
         ): Promise<TorrentCoreResult<TorrentSummary>>;
         pause(id: string): Promise<TorrentCoreResult<TorrentSummary>>;
         resume(id: string): Promise<TorrentCoreResult<TorrentSummary>>;
-        remove(id: string): Promise<TorrentCoreResult<TorrentCoreSnapshot>>;
+        remove(
+          request: string | RemoveTorrentRequest
+        ): Promise<TorrentCoreResult<TorrentCoreSnapshot>>;
         recheck(id: string): Promise<TorrentCoreResult<TorrentSummary>>;
+        copyMagnet(id: string): Promise<TorrentCoreResult<string>>;
+        openTorrentFolder(id: string): Promise<TorrentCoreResult<true>>;
+        openTorrentFile(
+          request: OpenTorrentFileRequest
+        ): Promise<TorrentCoreResult<true>>;
         updateLabels(
           request: UpdateTorrentLabelsRequest
         ): Promise<TorrentCoreResult<TorrentSummary>>;
@@ -67,6 +88,9 @@ declare global {
           request: SetTorrentFilePriorityRequest
         ): Promise<TorrentCoreResult<TorrentSummary>>;
         getSnapshot(): Promise<TorrentCoreResult<TorrentCoreSnapshot>>;
+        getStatistics(): Promise<TorrentCoreResult<TorrentStatistics>>;
+        getEventLogs(): Promise<TorrentCoreResult<TorrentEventLogEntry[]>>;
+        exportEventLogs(): Promise<TorrentCoreResult<TorrentEventLogExport>>;
         getNetworkSettings(): Promise<TorrentCoreResult<NetworkSettingsState>>;
         updateNetworkSettings(
           request: NetworkSettings
@@ -92,6 +116,7 @@ declare global {
           request: AutomationSettings
         ): Promise<TorrentCoreResult<AutomationSettingsState>>;
         runWatchFolderScan(): Promise<TorrentCoreResult<WatchFolderScanResult>>;
+        getDroppedTorrentFilePaths(files: File[]): string[];
         onEvent(listener: (event: TorrentCoreEvent) => void): () => void;
       };
       remoteAccess: {
@@ -131,6 +156,14 @@ declare global {
         downloadUpdate(): Promise<AppUpdateState>;
         installUpdate(): Promise<AppUpdateState>;
         onEvent(listener: (event: AppUpdateEvent) => void): () => void;
+      };
+      integration: {
+        getState(): Promise<AppIntegrationState>;
+        updateSettings(
+          settings: AppIntegrationSettings
+        ): Promise<AppIntegrationState>;
+        registerDefaultHandlers(): Promise<AppIntegrationState>;
+        onEvent(listener: (event: AppIntegrationEvent) => void): () => void;
       };
     };
   }

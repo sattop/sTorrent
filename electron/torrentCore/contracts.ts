@@ -41,6 +41,7 @@ export const TORRENT_CORE_EVENT_NAMES = [
   "torrent.progress.updated",
   "torrent.status.changed",
   "torrent.completed",
+  "torrent.removed",
   "torrent.labels.updated",
   "torrent.files.updated",
   "torrent.error",
@@ -63,15 +64,22 @@ export const TORRENT_CORE_EVENT_CHANNEL = "torrent:event";
 
 export const TORRENT_IPC_CHANNELS = {
   addTorrentFile: "torrent:addTorrentFile",
+  addTorrentUrl: "torrent:addTorrentUrl",
   addMagnet: "torrent:addMagnet",
   pause: "torrent:pause",
   resume: "torrent:resume",
   remove: "torrent:remove",
   recheck: "torrent:recheck",
+  copyMagnet: "torrent:copyMagnet",
+  openTorrentFolder: "torrent:openTorrentFolder",
+  openTorrentFile: "torrent:openTorrentFile",
   updateLabels: "torrent:updateLabels",
   updateProfile: "torrent:updateProfile",
   setFilePriority: "torrent:setFilePriority",
   getSnapshot: "torrent:getSnapshot",
+  getStatistics: "torrent:getStatistics",
+  getEventLogs: "torrent:getEventLogs",
+  exportEventLogs: "torrent:exportEventLogs",
   getNetworkSettings: "torrent:getNetworkSettings",
   updateNetworkSettings: "torrent:updateNetworkSettings",
   runNetworkDiagnostics: "torrent:runNetworkDiagnostics",
@@ -112,7 +120,7 @@ export type TorrentStatus =
   | "completed"
   | "error";
 
-export type TorrentSourceType = "torrent_file" | "magnet";
+export type TorrentSourceType = "torrent_file" | "magnet" | "torrent_url";
 
 export const TORRENT_FILE_PRIORITIES = ["skip", "normal", "high"] as const;
 
@@ -235,8 +243,22 @@ export interface AddTorrentFileRequest extends TorrentAddOptions {
   filePath?: string;
 }
 
+export interface AddTorrentUrlRequest extends TorrentAddOptions {
+  url: string;
+}
+
 export interface AddMagnetRequest extends TorrentAddOptions {
   magnetUri: string;
+}
+
+export interface RemoveTorrentRequest {
+  id: string;
+  deleteData?: boolean;
+}
+
+export interface OpenTorrentFileRequest {
+  id: string;
+  fileIndex: number;
 }
 
 export interface UpdateTorrentLabelsRequest {
@@ -266,6 +288,43 @@ export interface TorrentCoreSnapshot {
   torrents: TorrentSummary[];
   downloadSpeedBytes: number;
   uploadSpeedBytes: number;
+}
+
+export interface TorrentStatisticsCounters {
+  startedAt: string;
+  updatedAt: string;
+  downloadedBytes: number;
+  uploadedBytes: number;
+  torrentsAdded: number;
+  torrentsCompleted: number;
+  torrentsRemoved: number;
+}
+
+export interface TorrentStatistics {
+  session: TorrentStatisticsCounters;
+  allTime: TorrentStatisticsCounters;
+  current: {
+    torrentCount: number;
+    activeTorrentCount: number;
+    downloadSpeedBytes: number;
+    uploadSpeedBytes: number;
+  };
+}
+
+export type TorrentEventLogLevel = "info" | "warning" | "error";
+
+export interface TorrentEventLogEntry {
+  id: string;
+  timestamp: string;
+  level: TorrentEventLogLevel;
+  type: TorrentCoreEventName;
+  torrentId: string | null;
+  message: string;
+}
+
+export interface TorrentEventLogExport {
+  logPath: string;
+  entries: TorrentEventLogEntry[];
 }
 
 export interface SpeedLimitSettings {
@@ -735,6 +794,12 @@ export interface TorrentStatusChangedPayload {
   torrent: TorrentSummary;
 }
 
+export interface TorrentRemovedPayload {
+  id: string;
+  name: string;
+  deleteData: boolean;
+}
+
 export interface AssistantProfileAppliedPayload {
   id: string;
   profileId: DownloadProfileId;
@@ -796,6 +861,7 @@ export interface TorrentCoreEventPayloadMap {
   "torrent.progress.updated": TorrentSummary;
   "torrent.status.changed": TorrentStatusChangedPayload;
   "torrent.completed": TorrentSummary;
+  "torrent.removed": TorrentRemovedPayload;
   "torrent.labels.updated": TorrentSummary;
   "torrent.files.updated": TorrentSummary;
   "torrent.error": TorrentCoreErrorPayload;
@@ -820,6 +886,22 @@ export type TorrentCoreEvent = {
     payload: TorrentCoreEventPayloadMap[EventName];
   };
 }[keyof TorrentCoreEventPayloadMap];
+
+export function normalizeRemoveTorrentRequest(
+  request: string | RemoveTorrentRequest
+): Required<RemoveTorrentRequest> {
+  if (typeof request === "string") {
+    return {
+      id: request,
+      deleteData: false
+    };
+  }
+
+  return {
+    id: request.id,
+    deleteData: request.deleteData === true
+  };
+}
 
 export type TorrentCoreResult<T> =
   | {

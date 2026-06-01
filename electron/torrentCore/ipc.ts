@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain } from "electron";
+import { BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
 import { ASSISTANT_EVENT_CHANNEL, isAssistantEvent } from "../assistantEvents.js";
 import {
   ASSISTANT_IPC_CHANNELS,
@@ -6,6 +6,7 @@ import {
   TORRENT_IPC_CHANNELS,
   type AddMagnetRequest,
   type AddTorrentFileRequest,
+  type AddTorrentUrlRequest,
   type AssistantProfileApplyRequest,
   type AssistantWarningDismissRequest,
   type AutomationSettings,
@@ -15,6 +16,8 @@ import {
   type SpeedDoctorScanMode,
   type TorrentCoreEvent,
   type TorrentCoreResult,
+  type OpenTorrentFileRequest,
+  type RemoveTorrentRequest,
   type UpdateTorrentProfileRequest,
   type UpdateTorrentLabelsRequest
 } from "./contracts.js";
@@ -55,6 +58,12 @@ export function registerTorrentCoreIpc(core: WebTorrentCore) {
   );
 
   ipcMain.handle(
+    TORRENT_IPC_CHANNELS.addTorrentUrl,
+    async (_event, request: AddTorrentUrlRequest) =>
+      toResult(() => core.addTorrentUrl(request))
+  );
+
+  ipcMain.handle(
     TORRENT_IPC_CHANNELS.addMagnet,
     async (_event, request: AddMagnetRequest) =>
       toResult(() => core.addMagnet(request))
@@ -68,12 +77,48 @@ export function registerTorrentCoreIpc(core: WebTorrentCore) {
     toResult(() => core.resume(id))
   );
 
-  ipcMain.handle(TORRENT_IPC_CHANNELS.remove, async (_event, id: string) =>
-    toResult(() => core.remove(id))
+  ipcMain.handle(
+    TORRENT_IPC_CHANNELS.remove,
+    async (_event, request: string | RemoveTorrentRequest) =>
+      toResult(() => core.remove(request))
   );
 
   ipcMain.handle(TORRENT_IPC_CHANNELS.recheck, async (_event, id: string) =>
     toResult(() => core.recheck(id))
+  );
+
+  ipcMain.handle(TORRENT_IPC_CHANNELS.copyMagnet, async (_event, id: string) =>
+    toResult(() => {
+      const magnetUri = core.getMagnetUri(id);
+      clipboard.writeText(magnetUri);
+      return magnetUri;
+    })
+  );
+
+  ipcMain.handle(TORRENT_IPC_CHANNELS.openTorrentFolder, async (_event, id: string) =>
+    toResult(async () => {
+      const error = await shell.openPath(core.getTorrentFolderPath(id));
+
+      if (error) {
+        throw new Error(error);
+      }
+
+      return true;
+    })
+  );
+
+  ipcMain.handle(
+    TORRENT_IPC_CHANNELS.openTorrentFile,
+    async (_event, request: OpenTorrentFileRequest) =>
+      toResult(async () => {
+        const error = await shell.openPath(core.getTorrentFilePath(request));
+
+        if (error) {
+          throw new Error(error);
+        }
+
+        return true;
+      })
   );
 
   ipcMain.handle(
@@ -96,6 +141,18 @@ export function registerTorrentCoreIpc(core: WebTorrentCore) {
 
   ipcMain.handle(TORRENT_IPC_CHANNELS.getSnapshot, async () =>
     toResult(() => core.getSnapshot())
+  );
+
+  ipcMain.handle(TORRENT_IPC_CHANNELS.getStatistics, async () =>
+    toResult(() => core.getStatistics())
+  );
+
+  ipcMain.handle(TORRENT_IPC_CHANNELS.getEventLogs, async () =>
+    toResult(() => core.getEventLogs())
+  );
+
+  ipcMain.handle(TORRENT_IPC_CHANNELS.exportEventLogs, async () =>
+    toResult(() => core.exportEventLogs())
   );
 
   ipcMain.handle(TORRENT_IPC_CHANNELS.getNetworkSettings, async () =>

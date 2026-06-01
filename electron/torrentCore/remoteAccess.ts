@@ -6,10 +6,12 @@ import path from "node:path";
 import {
   REMOTE_ACCESS_HOSTS,
   type AddMagnetRequest,
+  type AddTorrentUrlRequest,
   type AutomationSettings,
   type AutomationSettingsState,
   type NetworkSettings,
   type NetworkSettingsState,
+  type RemoveTorrentRequest,
   type RemoteAccessCapabilities,
   type RemoteAccessHost,
   type RemoteAccessPublicSettings,
@@ -22,7 +24,10 @@ import {
   type SpeedDoctorReportExport,
   type TorrentCoreSnapshot,
   type TorrentCoreResult,
+  type TorrentEventLogEntry,
+  type TorrentEventLogExport,
   type TorrentSpeedDoctorReport,
+  type TorrentStatistics,
   type TorrentSummary,
   type UpdateTorrentLabelsRequest,
   type UpdateTorrentProfileRequest,
@@ -69,9 +74,11 @@ export interface RemoteAccessServerOptions {
 
 export interface RemoteAccessCore {
   addMagnet(request: AddMagnetRequest): Promise<TorrentSummary>;
+  addTorrentUrl(request: AddTorrentUrlRequest): Promise<TorrentSummary>;
+  getMagnetUri(id: string): string;
   pause(id: string): TorrentSummary;
   resume(id: string): TorrentSummary;
-  remove(id: string): Promise<TorrentCoreSnapshot>;
+  remove(request: string | RemoveTorrentRequest): Promise<TorrentCoreSnapshot>;
   recheck(id: string): Promise<TorrentSummary>;
   updateLabels(request: UpdateTorrentLabelsRequest): TorrentSummary;
   updateProfile(request: UpdateTorrentProfileRequest): TorrentSummary;
@@ -80,6 +87,9 @@ export interface RemoteAccessCore {
   getSpeedDoctorHistory(): SpeedDoctorHistorySummary;
   exportSpeedDoctorReport(id: string): Promise<SpeedDoctorReportExport>;
   getSnapshot(): TorrentCoreSnapshot;
+  getStatistics(): TorrentStatistics;
+  getEventLogs(): TorrentEventLogEntry[];
+  exportEventLogs(): Promise<TorrentEventLogExport>;
   getNetworkSettingsState(): NetworkSettingsState;
   updateNetworkSettings(settings: NetworkSettings): Promise<NetworkSettingsState>;
   getAutomationSettingsState(): AutomationSettingsState;
@@ -305,6 +315,25 @@ export class RemoteAccessServer {
         return;
       }
 
+      if (request.method === "GET" && route === "statistics") {
+        sendJson(response, 200, toOkResult(this.options.core.getStatistics()));
+        return;
+      }
+
+      if (request.method === "GET" && route === "event-logs") {
+        sendJson(response, 200, toOkResult(this.options.core.getEventLogs()));
+        return;
+      }
+
+      if (request.method === "POST" && route === "event-logs/export") {
+        sendJson(
+          response,
+          200,
+          await toResult(() => this.options.core.exportEventLogs())
+        );
+        return;
+      }
+
       if (request.method === "GET" && route === "speed-doctor/history") {
         sendJson(
           response,
@@ -320,6 +349,28 @@ export class RemoteAccessServer {
           response,
           200,
           await toResult(() => this.options.core.addMagnet(body))
+        );
+        return;
+      }
+
+      if (request.method === "POST" && route === "torrents/url") {
+        const body = await readJsonBody<AddTorrentUrlRequest>(request);
+        sendJson(
+          response,
+          200,
+          await toResult(() => this.options.core.addTorrentUrl(body))
+        );
+        return;
+      }
+
+      const torrentMagnetMatch = route.match(/^torrents\/([^/]+)\/magnet$/);
+
+      if (request.method === "GET" && torrentMagnetMatch) {
+        const id = decodeURIComponent(torrentMagnetMatch[1]);
+        sendJson(
+          response,
+          200,
+          await toResult(() => this.options.core.getMagnetUri(id))
         );
         return;
       }
@@ -893,7 +944,12 @@ function createApiDocs(origin: string | null) {
     authentication: "Authorization: Bearer <remote-access-password>",
     endpoints: [
       "GET /api/snapshot",
+      "GET /api/statistics",
+      "GET /api/event-logs",
+      "POST /api/event-logs/export",
       "POST /api/torrents/magnet",
+      "POST /api/torrents/url",
+      "GET /api/torrents/{id}/magnet",
       "POST /api/torrents/{id}/pause",
       "POST /api/torrents/{id}/resume",
       "POST /api/torrents/{id}/recheck",

@@ -316,6 +316,16 @@ export function getAIProviderDefinition(providerId: AIProviderId) {
   );
 }
 
+export function getAIProviderConfig(
+  providers: AIProviderConfig[],
+  providerId: AIProviderId
+) {
+  return (
+    providers.find((provider) => provider.providerId === providerId) ??
+    createDefaultAIProviderConfig(providerId)
+  );
+}
+
 export function createDefaultAIProviderConfig(
   providerId: AIProviderId
 ): AIProviderConfig {
@@ -339,6 +349,35 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
   )
 };
 
+export function normalizeAIProviderBaseUrl(providerId: AIProviderId, value: string) {
+  const normalized = trimTrailingSlash(value.trim());
+  const definition = getAIProviderDefinition(providerId);
+
+  if (!normalized || !definition.defaultBaseUrl) {
+    return normalized;
+  }
+
+  try {
+    const url = new URL(normalized);
+    const defaultUrl = new URL(definition.defaultBaseUrl);
+    const currentPath = trimTrailingSlash(url.pathname);
+    const defaultPath = trimTrailingSlash(defaultUrl.pathname);
+
+    if ((!currentPath || currentPath === "/") && defaultPath && defaultPath !== "/") {
+      url.pathname = defaultPath;
+      return trimTrailingSlash(url.toString());
+    }
+  } catch {
+    return normalized;
+  }
+
+  return normalized;
+}
+
 export function isLocalAIProvider(providerId: AIProviderId) {
   return LOCAL_AI_PROVIDER_IDS.includes(providerId);
+}
+
+function trimTrailingSlash(value: string) {
+  return value.replace(/\/+$/, "");
 }

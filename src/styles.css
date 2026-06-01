@@ -345,6 +345,76 @@ button:disabled {
   gap: 12px;
 }
 
+.magnet-form textarea {
+  width: 100%;
+  min-height: 84px;
+  padding: 9px 12px;
+  border: 1px solid #d7deea;
+  border-radius: 8px;
+  color: #111827;
+  background: #ffffff;
+  resize: vertical;
+}
+
+.drop-active {
+  outline: 2px dashed #2563eb;
+  outline-offset: 4px;
+  background: #eff6ff;
+}
+
+.torrent-toolbar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #e7edf6;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: end;
+  min-width: 0;
+}
+
+.toolbar-actions button {
+  width: 100%;
+}
+
+.column-picker {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  gap: 8px 12px;
+  min-width: 0;
+  margin: 0;
+  padding: 10px 0 0;
+  border: 0;
+  border-top: 1px solid #eef2f8;
+}
+
+.column-picker legend {
+  width: 100%;
+  margin-bottom: 4px;
+  color: #475467;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.column-reset-button {
+  margin-right: 4px;
+}
+
+.column-picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #475467;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .status-message {
   margin-bottom: 0;
   padding: 10px 12px;
@@ -567,6 +637,10 @@ button:disabled {
   margin: 0;
 }
 
+.torrent-column-strip {
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+}
+
 .torrent-stats div {
   display: grid;
   gap: 2px;
@@ -629,7 +703,7 @@ button:disabled {
 
 .file-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 132px;
+  grid-template-columns: minmax(0, 1fr) minmax(210px, 260px);
   align-items: center;
   gap: 12px;
   padding: 10px 12px;
@@ -654,6 +728,14 @@ button:disabled {
 .file-main span {
   color: #667085;
   font-size: 12px;
+}
+
+.file-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .row-actions {
@@ -799,6 +881,63 @@ button:disabled {
   font-weight: 700;
 }
 
+.stats-block-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.stats-counter-panel,
+.event-log-panel {
+  display: grid;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e7edf6;
+}
+
+.stats-counter-panel h3 {
+  margin: 0;
+}
+
+.event-log-list {
+  display: grid;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid #e7edf6;
+  border-radius: 8px;
+}
+
+.event-log-row {
+  display: grid;
+  grid-template-columns: 150px 210px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid #eef2f8;
+  color: #475467;
+  font-size: 12px;
+}
+
+.event-log-row:first-child {
+  border-top: 0;
+}
+
+.event-log-row strong {
+  color: #101828;
+}
+
+.event-log-row p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.event-log-row.warning {
+  background: #fffaeb;
+}
+
+.event-log-row.error {
+  background: #fff1f2;
+}
+
 .doctor-anomalies,
 .doctor-diagnoses {
   display: grid;
@@ -892,6 +1031,13 @@ button:disabled {
   gap: 14px;
 }
 
+.app-integration-settings {
+  display: grid;
+  gap: 14px;
+  padding-top: 18px;
+  border-top: 1px solid #e7edf6;
+}
+
 .ai-settings {
   display: grid;
   gap: 14px;
@@ -900,6 +1046,9 @@ button:disabled {
 }
 
 .app-update-settings + .ai-settings,
+.app-update-settings + .app-integration-settings,
+.app-integration-settings + .ai-settings,
+.app-integration-settings + .network-settings,
 .app-update-settings + .network-settings,
 .ai-settings + .network-settings {
   padding-top: 18px;
@@ -951,6 +1100,18 @@ button:disabled {
   width: 16px;
   height: 16px;
   accent-color: #2563eb;
+}
+
+.integration-status-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.integration-status-grid p {
+  margin: 0;
+  color: #475467;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .small-button {
@@ -1323,8 +1484,12 @@ button:disabled {
   .speed-doctor-card,
   .assistant-panel > div + div,
   .app-update-settings + .ai-settings,
+  .app-update-settings + .app-integration-settings,
+  .app-integration-settings + .ai-settings,
+  .app-integration-settings + .network-settings,
   .app-update-settings + .network-settings,
   .ai-settings + .network-settings,
+  .app-integration-settings,
   .ai-settings,
   .remote-access-settings,
   .automation-section,
@@ -1336,6 +1501,8 @@ button:disabled {
   .file-list,
   .torrent-diagnostic-item,
   .torrent-context-menu,
+  .torrent-toolbar,
+  .event-log-list,
   .diagnostic-item,
   .queue-row {
     border-color: #233047;
@@ -1386,6 +1553,21 @@ button:disabled {
 
   .diagnostic-item {
     background: #111827;
+  }
+
+  .torrent-toolbar,
+  .stats-counter-panel,
+  .event-log-panel {
+    background: #111827;
+  }
+
+  .event-log-row {
+    border-color: #233047;
+    color: #a8b3c7;
+  }
+
+  .event-log-row strong {
+    color: #f8fafc;
   }
 
   .torrent-diagnostic-item,
@@ -1510,9 +1692,19 @@ button:disabled {
   .content-layout,
   .label-fields,
   .limit-grid,
+  .torrent-toolbar,
+  .stats-block-grid,
   .magnet-form,
   .labels-editor,
   .file-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .file-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .event-log-row {
     grid-template-columns: minmax(0, 1fr);
   }
 

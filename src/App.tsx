@@ -19,6 +19,13 @@ import {
   storeRemotePassword
 } from "./app/remoteApi";
 import {
+  DEFAULT_TORRENT_COLUMNS,
+  TORRENT_COLUMN_IDS,
+  TORRENT_COLUMNS_STORAGE_KEY,
+  normalizeTorrentColumns,
+  type TorrentColumnId
+} from "./app/torrentColumns";
+import {
   DOWNLOAD_PROFILE_IDS,
   type DownloadProfileId,
   type SmartAssistantRecommendation,
@@ -50,7 +57,9 @@ import type {
   SpeedDoctorScanMode,
   TorrentCoreEvent,
   TorrentCoreResult,
+  TorrentEventLogEntry,
   TorrentCoreSnapshot,
+  TorrentStatistics,
   TorrentFilePriority,
   TorrentSpeedDoctorReport,
   TorrentSummary,
@@ -66,6 +75,10 @@ import type {
   AppUpdateState,
   AppUpdateStatus
 } from "../electron/appUpdateContracts";
+import type {
+  AppIntegrationSettings,
+  AppIntegrationState
+} from "../electron/appIntegrationContracts";
 
 const localeNames: Record<Locale, string> = {
   ru: "Русский",
@@ -91,11 +104,44 @@ const AUTO_SPEED_DOCTOR_ACTIVE_MS = 3 * 60 * 1000;
 const AUTO_SPEED_DOCTOR_THROTTLE_MS = 30 * 60 * 1000;
 const AUTO_SPEED_DOCTOR_LOW_SPEED_BYTES = 64 * 1024;
 const ADD_ASSISTANT_ADVICE_KEY = "add";
+const torrentStatusFilters = [
+  "all",
+  "adding",
+  "checking",
+  "queued",
+  "downloading",
+  "paused",
+  "seeding",
+  "completed",
+  "error"
+] as const;
+type TorrentStatusFilter = (typeof torrentStatusFilters)[number];
+const torrentSortIds = [
+  "added_desc",
+  "name_asc",
+  "status_asc",
+  "progress_desc",
+  "speed_desc",
+  "size_desc"
+] as const;
+type TorrentSortId = (typeof torrentSortIds)[number];
 
 export function App() {
   const [locale, setLocale] = useState<Locale>("ru");
   const [activeNav, setActiveNav] = useState<NavItem>("downloads");
   const [magnetUri, setMagnetUri] = useState("");
+  const [torrentUrl, setTorrentUrl] = useState("");
+  const [isTorrentDragActive, setIsTorrentDragActive] = useState(false);
+  const [torrentSearch, setTorrentSearch] = useState("");
+  const [torrentStatusFilter, setTorrentStatusFilter] =
+    useState<TorrentStatusFilter>("all");
+  const [torrentCategoryFilter, setTorrentCategoryFilter] = useState("");
+  const [torrentTagFilter, setTorrentTagFilter] = useState("");
+  const [torrentTrackerFilter, setTorrentTrackerFilter] = useState("");
+  const [torrentSortId, setTorrentSortId] =
+    useState<TorrentSortId>("added_desc");
+  const [visibleTorrentColumns, setVisibleTorrentColumns] =
+    useState<TorrentColumnId[]>(() => readStoredTorrentColumns());
   const [selectedProfileId, setSelectedProfileId] =
     useState<DownloadProfileId>(() => readStoredDownloadProfile());
   const [categoryDraft, setCategoryDraft] = useState("");
@@ -105,6 +151,8 @@ export function App() {
     downloadSpeedBytes: 0,
     uploadSpeedBytes: 0
   });
+  const [statistics, setStatistics] = useState<TorrentStatistics | null>(null);
+  const [eventLogs, setEventLogs] = useState<TorrentEventLogEntry[]>([]);
   const [networkState, setNetworkState] = useState<NetworkSettingsState | null>(
     null
   );
@@ -174,6 +222,10 @@ export function App() {
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState | null>(
     null
   );
+  const [appIntegrationState, setAppIntegrationState] =
+    useState<AppIntegrationState | null>(null);
+  const [appIntegrationDraft, setAppIntegrationDraft] =
+    useState<AppIntegrationSettings | null>(null);
   const torrentApi = useMemo(
     () => window.storent?.torrent ?? createRemoteTorrentApi(() => remotePassword),
     [remotePassword]
@@ -285,10 +337,38 @@ export function App() {
       speedDoctorReports
     ]
   );
+  const torrentFilterOptions = useMemo(
+    () => createTorrentFilterOptions(snapshot.torrents),
+    [snapshot.torrents]
+  );
+  const visibleTorrents = useMemo(
+    () =>
+      filterAndSortTorrents(snapshot.torrents, {
+        search: torrentSearch,
+        status: torrentStatusFilter,
+        category: torrentCategoryFilter,
+        tag: torrentTagFilter,
+        tracker: torrentTrackerFilter,
+        sortId: torrentSortId
+      }),
+    [
+      snapshot.torrents,
+      torrentCategoryFilter,
+      torrentSearch,
+      torrentSortId,
+      torrentStatusFilter,
+      torrentTagFilter,
+      torrentTrackerFilter
+    ]
+  );
 
   useEffect(() => {
     storeDownloadProfile(selectedProfileId);
   }, [selectedProfileId]);
+
+  useEffect(() => {
+    storeTorrentColumns(visibleTorrentColumns);
+  }, [visibleTorrentColumns]);
 
   useEffect(() => {
     if (!contextMenu) {
@@ -429,6 +509,41 @@ export function App() {
   }, [isRemoteWeb, remotePassword, t, torrentApi]);
 
   useEffect(() => {
+    if (activeNav !== "stats") {
+      return;
+    }
+
+    const api = torrentApi;
+
+    if (isRemoteWeb && !remotePassword) {
+      return;
+    }
+
+    let mounted = true;
+
+    const refreshStats = () => {
+      void api.getStatistics().then((result) => {
+        if (mounted) {
+          applyResult(result, setStatistics, () => handleResultError(result));
+        }
+      });
+      void api.getEventLogs().then((result) => {
+        if (mounted) {
+          applyResult(result, setEventLogs, () => handleResultError(result));
+        }
+      });
+    };
+
+    refreshStats();
+    const timer = window.setInterval(refreshStats, 5_000);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, [activeNav, isRemoteWeb, remotePassword, torrentApi]);
+
+  useEffect(() => {
     const api = window.storent?.assistant;
 
     if (!api) {
@@ -567,6 +682,35 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const api = window.storent?.integration;
+
+    if (!api) {
+      return;
+    }
+
+    let mounted = true;
+
+    void api.getState().then((state) => {
+      if (!mounted) {
+        return;
+      }
+
+      setAppIntegrationState(state);
+      setAppIntegrationDraft(state.settings);
+    });
+
+    const unsubscribe = api.onEvent((event) => {
+      setAppIntegrationState(event.state);
+      setAppIntegrationDraft(event.state.settings);
+    });
+
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
     const api = window.storent?.ai;
 
     if (!api) {
@@ -673,16 +817,14 @@ export function App() {
     handleTorrentResult(result, t("message.torrentAdded"));
   }
 
-  async function addMagnet(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    if (!magnetUri.trim()) {
-      setStatusMessage(t("error.emptyMagnet"));
+  async function addTorrentUrl() {
+    if (!torrentUrl.trim()) {
+      setStatusMessage(t("error.emptyTorrentUrl"));
       return;
     }
 
-    const result = await torrentApi.addMagnet({
-      magnetUri: magnetUri.trim(),
+    const result = await torrentApi.addTorrentUrl({
+      url: torrentUrl.trim(),
       profileId: selectedProfileId,
       ...getAddOptions(
         automationDraft,
@@ -695,7 +837,102 @@ export function App() {
     handleTorrentResult(result, t("message.torrentAdded"));
 
     if (result?.ok) {
+      setTorrentUrl("");
+    }
+  }
+
+  async function addMagnet(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const magnetUris = parseMagnetUris(magnetUri);
+
+    if (magnetUris.length === 0) {
+      setStatusMessage(t("error.emptyMagnet"));
+      return;
+    }
+
+    let addedCount = 0;
+    let failedCount = 0;
+    const addOptions = getAddOptions(
+      automationDraft,
+      selectedFavoriteFolderId,
+      categoryDraft,
+      tagsDraft
+    );
+
+    for (const uri of magnetUris) {
+      const result = await torrentApi.addMagnet({
+        magnetUri: uri,
+        profileId: selectedProfileId,
+        ...addOptions
+      });
+
+      if (result?.ok) {
+        addedCount += 1;
+      } else {
+        failedCount += 1;
+        if (result) {
+          handleResultError(result);
+        }
+      }
+    }
+
+    if (addedCount > 0) {
+      setStatusMessage(
+        `${t("message.torrentsAdded")} ${addedCount}${
+          failedCount > 0 ? `, ${t("message.torrentsFailed")} ${failedCount}` : ""
+        }`
+      );
       setMagnetUri("");
+    }
+  }
+
+  async function addDroppedTorrentFiles(files: File[]) {
+    const resolveFiles = window.storent?.torrent.getDroppedTorrentFilePaths;
+
+    if (!resolveFiles) {
+      setStatusMessage(t("remote.unsupportedAction"));
+      return;
+    }
+
+    const filePaths = resolveFiles(files);
+
+    if (filePaths.length === 0) {
+      setStatusMessage(t("error.noTorrentFilesDropped"));
+      return;
+    }
+
+    let addedCount = 0;
+    let failedCount = 0;
+    const addOptions = getAddOptions(
+      automationDraft,
+      selectedFavoriteFolderId,
+      categoryDraft,
+      tagsDraft
+    );
+
+    for (const filePath of filePaths) {
+      const result = await torrentApi.addTorrentFile({
+        filePath,
+        profileId: selectedProfileId,
+        ...addOptions
+      });
+
+      if (result?.ok) {
+        addedCount += 1;
+      } else {
+        failedCount += 1;
+        if (result) {
+          handleResultError(result);
+        }
+      }
+    }
+
+    if (addedCount > 0) {
+      setStatusMessage(
+        `${t("message.torrentsAdded")} ${addedCount}${
+          failedCount > 0 ? `, ${t("message.torrentsFailed")} ${failedCount}` : ""
+        }`
+      );
     }
   }
 
@@ -713,8 +950,12 @@ export function App() {
     );
   }
 
-  async function removeTorrent(id: string) {
-    const result = await torrentApi.remove(id);
+  async function removeTorrent(id: string, deleteData = false) {
+    if (deleteData && !window.confirm(t("confirm.deleteTorrentData"))) {
+      return;
+    }
+
+    const result = await torrentApi.remove({ id, deleteData });
 
     if (!result) {
       setStatusMessage(t("core.unavailable"));
@@ -723,7 +964,9 @@ export function App() {
 
     if (result.ok) {
       setSnapshot(result.value);
-      setStatusMessage(t("message.torrentRemoved"));
+      setStatusMessage(
+        deleteData ? t("message.torrentDataRemoved") : t("message.torrentRemoved")
+      );
       return;
     }
 
@@ -734,6 +977,27 @@ export function App() {
     handleTorrentResult(
       await torrentApi.recheck(id),
       t("message.recheckStarted")
+    );
+  }
+
+  async function copyMagnet(id: string) {
+    handleActionResult(
+      await torrentApi.copyMagnet(id),
+      t("message.magnetCopied")
+    );
+  }
+
+  async function openTorrentFolder(id: string) {
+    handleActionResult(
+      await torrentApi.openTorrentFolder(id),
+      t("message.openedInSystem")
+    );
+  }
+
+  async function openTorrentFile(id: string, fileIndex: number) {
+    handleActionResult(
+      await torrentApi.openTorrentFile({ id, fileIndex }),
+      t("message.openedInSystem")
     );
   }
 
@@ -910,6 +1174,23 @@ export function App() {
       setStatusMessage(
         `${t("message.speedDoctorReportSaved")} ${result.value.reportPath}`
       );
+      return;
+    }
+
+    handleResultError(result);
+  }
+
+  async function exportEventLogs() {
+    const result = await torrentApi.exportEventLogs();
+
+    if (!result) {
+      setStatusMessage(t("core.unavailable"));
+      return;
+    }
+
+    if (result.ok) {
+      setEventLogs(result.value.entries);
+      setStatusMessage(`${t("message.logsSaved")} ${result.value.logPath}`);
       return;
     }
 
@@ -1281,6 +1562,38 @@ export function App() {
     setAppUpdateState(state);
   }
 
+  async function saveAppIntegrationSettings() {
+    if (!appIntegrationDraft) {
+      return;
+    }
+
+    const state = await window.storent?.integration?.updateSettings(
+      appIntegrationDraft
+    );
+
+    if (!state) {
+      setStatusMessage(t("integration.unavailable"));
+      return;
+    }
+
+    setAppIntegrationState(state);
+    setAppIntegrationDraft(state.settings);
+    setStatusMessage(t("message.integrationSettingsSaved"));
+  }
+
+  async function registerDefaultHandlers() {
+    const state = await window.storent?.integration?.registerDefaultHandlers();
+
+    if (!state) {
+      setStatusMessage(t("integration.unavailable"));
+      return;
+    }
+
+    setAppIntegrationState(state);
+    setAppIntegrationDraft(state.settings);
+    setStatusMessage(t("message.defaultHandlersRegistered"));
+  }
+
   async function saveAISettings() {
     if (!aiDraft) {
       return;
@@ -1317,6 +1630,15 @@ export function App() {
     setStatusMessage(getFriendlyAIError(result, t));
   }
 
+  function updateAISettingsDraft(settings: AISettings) {
+    if (settings.activeProviderId !== aiDraft?.activeProviderId) {
+      setAiModels([]);
+    }
+
+    setAiProviderTest(null);
+    setAiDraft(settings);
+  }
+
   async function testAIProvider() {
     const provider = getActiveAIProvider(aiDraft);
     const api = window.storent?.ai;
@@ -1326,6 +1648,7 @@ export function App() {
       return;
     }
 
+    setAiProviderTest(null);
     const result = await api.testProvider({
       ...provider,
       apiKey: aiApiKeyDraft.trim() || undefined
@@ -1351,6 +1674,7 @@ export function App() {
       return;
     }
 
+    setAiModels([]);
     const result = await api.listModels({
       ...provider,
       apiKey: aiApiKeyDraft.trim() || undefined
@@ -1518,6 +1842,23 @@ export function App() {
     handleResultError(result);
   }
 
+  function handleActionResult<T>(
+    result: TorrentCoreResult<T> | undefined,
+    successMessage: string
+  ) {
+    if (!result) {
+      setStatusMessage(t("core.unavailable"));
+      return;
+    }
+
+    if (result.ok) {
+      setStatusMessage(successMessage);
+      return;
+    }
+
+    handleResultError(result);
+  }
+
   if (isRemoteWeb && !remotePassword) {
     return (
       <main className="remote-login-shell">
@@ -1659,7 +2000,19 @@ export function App() {
           <section className="downloads-panel">
             {activeNav === "downloads" ? (
               <>
-            <article className="add-panel">
+            <article
+              className={isTorrentDragActive ? "add-panel drop-active" : "add-panel"}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setIsTorrentDragActive(true);
+              }}
+              onDragLeave={() => setIsTorrentDragActive(false)}
+              onDrop={(event) => {
+                event.preventDefault();
+                setIsTorrentDragActive(false);
+                void addDroppedTorrentFiles(Array.from(event.dataTransfer.files));
+              }}
+            >
               <div>
                 <h2>{t("add.title")}</h2>
                 <p>{t("add.description")}</p>
@@ -1745,10 +2098,30 @@ export function App() {
                 </button>
               </div>
 
+              <form
+                className="magnet-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void addTorrentUrl();
+                }}
+              >
+                <label>
+                  <span>{t("add.urlLabel")}</span>
+                  <input
+                    value={torrentUrl}
+                    onChange={(event) => setTorrentUrl(event.target.value)}
+                    placeholder={t("add.urlPlaceholder")}
+                  />
+                </label>
+                <button type="submit" className="secondary">
+                  {t("action.addTorrentUrl")}
+                </button>
+              </form>
+
               <form className="magnet-form" onSubmit={addMagnet}>
                 <label>
                   <span>{t("add.magnetLabel")}</span>
-                  <input
+                  <textarea
                     value={magnetUri}
                     onChange={(event) => setMagnetUri(event.target.value)}
                     placeholder={t("add.magnetPlaceholder")}
@@ -1797,6 +2170,34 @@ export function App() {
               />
             ) : null}
 
+            <TorrentToolbar
+              search={torrentSearch}
+              status={torrentStatusFilter}
+              category={torrentCategoryFilter}
+              tag={torrentTagFilter}
+              tracker={torrentTrackerFilter}
+              sortId={torrentSortId}
+              visibleColumns={visibleTorrentColumns}
+              options={torrentFilterOptions}
+              t={t}
+              onSearchChange={setTorrentSearch}
+              onStatusChange={setTorrentStatusFilter}
+              onCategoryChange={setTorrentCategoryFilter}
+              onTagChange={setTorrentTagFilter}
+              onTrackerChange={setTorrentTrackerFilter}
+              onSortChange={setTorrentSortId}
+              onResetFilters={() => {
+                setTorrentSearch("");
+                setTorrentStatusFilter("all");
+                setTorrentCategoryFilter("");
+                setTorrentTagFilter("");
+                setTorrentTrackerFilter("");
+                setTorrentSortId("added_desc");
+              }}
+              onVisibleColumnsChange={setVisibleTorrentColumns}
+              onResetColumns={() => setVisibleTorrentColumns(DEFAULT_TORRENT_COLUMNS)}
+            />
+
             {snapshot.torrents.length === 0 ? (
               <article className="empty-state">
                 <h2>{t("empty.title")}</h2>
@@ -1804,7 +2205,12 @@ export function App() {
               </article>
             ) : (
               <div className="torrent-list" aria-label={t("downloads.listLabel")}>
-                {snapshot.torrents.map((torrent) => (
+                {visibleTorrents.length === 0 ? (
+                  <article className="empty-state compact-empty">
+                    <h2>{t("empty.filteredTitle")}</h2>
+                    <p>{t("empty.filteredDescription")}</p>
+                  </article>
+                ) : visibleTorrents.map((torrent) => (
                   <article
                     className="torrent-row"
                     key={torrent.id}
@@ -1837,24 +2243,12 @@ export function App() {
                       <span style={{ width: `${toRatio(torrent.progress) * 100}%` }} />
                     </div>
 
-                    <dl className="torrent-stats">
-                      <div>
-                        <dt>{t("torrent.stat.down")}</dt>
-                        <dd>{formatSpeed(torrent.downloadSpeedBytes)}</dd>
-                      </div>
-                      <div>
-                        <dt>{t("torrent.stat.up")}</dt>
-                        <dd>{formatSpeed(torrent.uploadSpeedBytes)}</dd>
-                      </div>
-                      <div>
-                        <dt>{t("torrent.stat.peers")}</dt>
-                        <dd>{torrent.peers}</dd>
-                      </div>
-                      <div>
-                        <dt>{t("torrent.stat.eta")}</dt>
-                        <dd>{formatEta(torrent.etaSeconds, t("torrent.etaUnknown"))}</dd>
-                      </div>
-                    </dl>
+                    <TorrentColumnStrip
+                      torrent={torrent}
+                      columns={visibleTorrentColumns}
+                      locale={locale}
+                      t={t}
+                    />
 
                     <TorrentLabelsEditor
                       torrent={torrent}
@@ -1867,6 +2261,7 @@ export function App() {
                       locale={locale}
                       t={t}
                       onPriorityChange={setTorrentFilePriority}
+                      onOpenFile={openTorrentFile}
                     />
 
                     <div className="row-actions">
@@ -1889,6 +2284,28 @@ export function App() {
                       <button
                         type="button"
                         className="secondary"
+                        onClick={() => copyMagnet(torrent.id)}
+                      >
+                        {t("action.copyMagnet")}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => openTorrentFolder(torrent.id)}
+                      >
+                        {t("action.openFolder")}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => openTorrentFile(torrent.id, 0)}
+                        disabled={torrent.files.length === 0}
+                      >
+                        {t("action.openFile")}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
                         onClick={() => recheckTorrent(torrent.id)}
                         disabled={!torrent.recheckAvailable}
                       >
@@ -1900,6 +2317,14 @@ export function App() {
                         onClick={() => removeTorrent(torrent.id)}
                       >
                         {t("action.removeFromList")}
+                      </button>
+                      <button
+                        type="button"
+                        className="danger"
+                        onClick={() => removeTorrent(torrent.id, true)}
+                        disabled={isRemoteWeb}
+                      >
+                        {t("action.removeWithData")}
                       </button>
                     </div>
                     {speedDoctorReports[torrent.id] ? (
@@ -1939,6 +2364,7 @@ export function App() {
                 locale={locale}
                 t={t}
                 onPriorityChange={setTorrentFilePriority}
+                onOpenFile={openTorrentFile}
               />
             ) : null}
 
@@ -1947,7 +2373,14 @@ export function App() {
             ) : null}
 
             {activeNav === "stats" ? (
-              <StatsPanel snapshot={snapshot} locale={locale} t={t} />
+              <StatsPanel
+                snapshot={snapshot}
+                statistics={statistics}
+                eventLogs={eventLogs}
+                locale={locale}
+                t={t}
+                onExportLogs={exportEventLogs}
+              />
             ) : null}
 
             {activeNav === "automation" ? (
@@ -1976,6 +2409,16 @@ export function App() {
                     onInstall={installAppUpdate}
                   />
                 ) : null}
+                {window.storent?.integration ? (
+                  <AppIntegrationPanel
+                    state={appIntegrationState}
+                    draft={appIntegrationDraft}
+                    t={t}
+                    onChange={setAppIntegrationDraft}
+                    onSave={saveAppIntegrationSettings}
+                    onRegisterDefaultHandlers={registerDefaultHandlers}
+                  />
+                ) : null}
                 {window.storent?.ai ? (
                   <AISettingsPanel
                     aiDraft={aiDraft}
@@ -1984,7 +2427,7 @@ export function App() {
                     providerTest={aiProviderTest}
                     models={aiModels}
                     t={t}
-                    onChange={setAiDraft}
+                    onChange={updateAISettingsDraft}
                     onApiKeyChange={setAiApiKeyDraft}
                     onSave={saveAISettings}
                     onTest={testAIProvider}
@@ -2074,14 +2517,212 @@ export function App() {
             onRunSpeedDoctor={(torrent) => {
               void runTorrentSpeedDoctor(torrent.id);
             }}
+            onCopyMagnet={copyMagnet}
+            onOpenFolder={openTorrentFolder}
+            onOpenFile={(id) => openTorrentFile(id, 0)}
             onPause={pauseTorrent}
             onResume={resumeTorrent}
             onRecheck={recheckTorrent}
             onRemove={removeTorrent}
+            onRemoveData={(id) => removeTorrent(id, true)}
           />
         ) : null}
       </section>
     </main>
+  );
+}
+
+function TorrentToolbar({
+  search,
+  status,
+  category,
+  tag,
+  tracker,
+  sortId,
+  visibleColumns,
+  options,
+  t,
+  onSearchChange,
+  onStatusChange,
+  onCategoryChange,
+  onTagChange,
+  onTrackerChange,
+  onSortChange,
+  onResetFilters,
+  onVisibleColumnsChange,
+  onResetColumns
+}: {
+  search: string;
+  status: TorrentStatusFilter;
+  category: string;
+  tag: string;
+  tracker: string;
+  sortId: TorrentSortId;
+  visibleColumns: TorrentColumnId[];
+  options: ReturnType<typeof createTorrentFilterOptions>;
+  t: (key: string) => string;
+  onSearchChange: (value: string) => void;
+  onStatusChange: (value: TorrentStatusFilter) => void;
+  onCategoryChange: (value: string) => void;
+  onTagChange: (value: string) => void;
+  onTrackerChange: (value: string) => void;
+  onSortChange: (value: TorrentSortId) => void;
+  onResetFilters: () => void;
+  onVisibleColumnsChange: (value: TorrentColumnId[]) => void;
+  onResetColumns: () => void;
+}) {
+  const visibleColumnSet = new Set(visibleColumns);
+  const hasActiveFilters =
+    search.trim().length > 0 ||
+    status !== "all" ||
+    category.length > 0 ||
+    tag.length > 0 ||
+    tracker.length > 0 ||
+    sortId !== "added_desc";
+  const hasCustomColumns = !areTorrentColumnsEqual(
+    visibleColumns,
+    DEFAULT_TORRENT_COLUMNS
+  );
+
+  return (
+    <section className="torrent-toolbar" aria-label={t("downloads.tools")}>
+      <label className="control-field">
+        <span>{t("downloads.search")}</span>
+        <input
+          value={search}
+          onChange={(event) => onSearchChange(event.target.value)}
+          placeholder={t("downloads.searchPlaceholder")}
+        />
+      </label>
+      <label className="control-field">
+        <span>{t("downloads.statusFilter")}</span>
+        <select
+          value={status}
+          onChange={(event) =>
+            onStatusChange(event.target.value as TorrentStatusFilter)
+          }
+        >
+          {torrentStatusFilters.map((item) => (
+            <option value={item} key={item}>
+              {item === "all" ? t("filters.all") : t(`torrent.status.${item}`)}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="control-field">
+        <span>{t("downloads.categoryFilter")}</span>
+        <select
+          value={category}
+          onChange={(event) => onCategoryChange(event.target.value)}
+        >
+          <option value="">{t("filters.all")}</option>
+          {options.categories.map((item) => (
+            <option value={item} key={item}>
+              {item}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="control-field">
+        <span>{t("downloads.tagFilter")}</span>
+        <select value={tag} onChange={(event) => onTagChange(event.target.value)}>
+          <option value="">{t("filters.all")}</option>
+          {options.tags.map((item) => (
+            <option value={item} key={item}>
+              {item}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="control-field">
+        <span>{t("downloads.trackerFilter")}</span>
+        <select
+          value={tracker}
+          onChange={(event) => onTrackerChange(event.target.value)}
+        >
+          <option value="">{t("filters.all")}</option>
+          {options.trackers.map((item) => (
+            <option value={item} key={item}>
+              {item}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="control-field">
+        <span>{t("downloads.sort")}</span>
+        <select
+          value={sortId}
+          onChange={(event) => onSortChange(event.target.value as TorrentSortId)}
+        >
+          {torrentSortIds.map((item) => (
+            <option value={item} key={item}>
+              {t(`sort.${item}`)}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="toolbar-actions">
+        <button
+          type="button"
+          className="secondary small-button"
+          disabled={!hasActiveFilters}
+          onClick={onResetFilters}
+        >
+          {t("action.resetFilters")}
+        </button>
+      </div>
+      <fieldset className="column-picker">
+        <legend>{t("downloads.columns")}</legend>
+        <button
+          type="button"
+          className="secondary small-button column-reset-button"
+          disabled={!hasCustomColumns}
+          onClick={onResetColumns}
+        >
+          {t("action.defaultColumns")}
+        </button>
+        {TORRENT_COLUMN_IDS.map((columnId) => (
+          <label key={columnId}>
+            <input
+              type="checkbox"
+              checked={visibleColumnSet.has(columnId)}
+              onChange={(event) => {
+                const next = event.target.checked
+                  ? normalizeTorrentColumns([...visibleColumns, columnId])
+                  : normalizeTorrentColumns(
+                      visibleColumns.filter((item) => item !== columnId)
+                    );
+                onVisibleColumnsChange(next);
+              }}
+            />
+            <span>{t(`torrent.column.${columnId}`)}</span>
+          </label>
+        ))}
+      </fieldset>
+    </section>
+  );
+}
+
+function TorrentColumnStrip({
+  torrent,
+  columns,
+  locale,
+  t
+}: {
+  torrent: TorrentSummary;
+  columns: TorrentColumnId[];
+  locale: Locale;
+  t: (key: string) => string;
+}) {
+  return (
+    <dl className="torrent-stats torrent-column-strip">
+      {columns.map((columnId) => (
+        <div key={columnId}>
+          <dt>{t(`torrent.column.${columnId}`)}</dt>
+          <dd>{formatTorrentColumnValue(torrent, columnId, locale, t)}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
@@ -2123,7 +2764,8 @@ function FilesPanel({
   snapshot,
   locale,
   t,
-  onPriorityChange
+  onPriorityChange,
+  onOpenFile
 }: {
   snapshot: TorrentCoreSnapshot;
   locale: Locale;
@@ -2133,6 +2775,7 @@ function FilesPanel({
     fileIndex: number,
     priority: TorrentFilePriority
   ) => void;
+  onOpenFile: (id: string, fileIndex: number) => void | Promise<void>;
 }) {
   return (
     <article className="add-panel view-panel">
@@ -2151,6 +2794,7 @@ function FilesPanel({
               locale={locale}
               t={t}
               onPriorityChange={onPriorityChange}
+              onOpenFile={onOpenFile}
             />
           </section>
         ))
@@ -2198,12 +2842,18 @@ function TrackersPanel({
 
 function StatsPanel({
   snapshot,
+  statistics,
+  eventLogs,
   locale,
-  t
+  t,
+  onExportLogs
 }: {
   snapshot: TorrentCoreSnapshot;
+  statistics: TorrentStatistics | null;
+  eventLogs: TorrentEventLogEntry[];
   locale: Locale;
   t: (key: string) => string;
+  onExportLogs: () => void | Promise<void>;
 }) {
   const completed = snapshot.torrents.filter(
     (torrent) => torrent.status === "completed" || torrent.status === "seeding"
@@ -2229,6 +2879,20 @@ function StatsPanel({
           <strong>{new Intl.NumberFormat(locale).format(completed)}</strong>
         </article>
       </section>
+      <section className="stats-block-grid">
+        <StatisticsCounters
+          title={t("stats.session")}
+          counters={statistics?.session ?? null}
+          locale={locale}
+          t={t}
+        />
+        <StatisticsCounters
+          title={t("stats.allTime")}
+          counters={statistics?.allTime ?? null}
+          locale={locale}
+          t={t}
+        />
+      </section>
       <dl className="torrent-stats">
         <div>
           <dt>{t("metric.download")}</dt>
@@ -2239,7 +2903,72 @@ function StatsPanel({
           <dd>{formatSpeed(snapshot.uploadSpeedBytes)}</dd>
         </div>
       </dl>
+      <section className="event-log-panel">
+        <div className="section-heading">
+          <h3>{t("logs.title")}</h3>
+          <button type="button" className="secondary small-button" onClick={() => void onExportLogs()}>
+            {t("logs.export")}
+          </button>
+        </div>
+        {eventLogs.length === 0 ? (
+          <p className="file-pending">{t("logs.empty")}</p>
+        ) : (
+          <div className="event-log-list">
+            {eventLogs.slice(0, 40).map((entry) => (
+              <div className={`event-log-row ${entry.level}`} key={entry.id}>
+                <span>{formatDateTime(entry.timestamp, locale)}</span>
+                <strong>{entry.type}</strong>
+                <p>{entry.message}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </article>
+  );
+}
+
+function StatisticsCounters({
+  title,
+  counters,
+  locale,
+  t
+}: {
+  title: string;
+  counters: TorrentStatistics["session"] | null;
+  locale: Locale;
+  t: (key: string) => string;
+}) {
+  return (
+    <section className="stats-counter-panel">
+      <h3>{title}</h3>
+      <dl className="torrent-stats">
+        <div>
+          <dt>{t("stats.downloaded")}</dt>
+          <dd>{formatBytes(counters?.downloadedBytes ?? 0)}</dd>
+        </div>
+        <div>
+          <dt>{t("stats.uploaded")}</dt>
+          <dd>{formatBytes(counters?.uploadedBytes ?? 0)}</dd>
+        </div>
+        <div>
+          <dt>{t("stats.added")}</dt>
+          <dd>{new Intl.NumberFormat(locale).format(counters?.torrentsAdded ?? 0)}</dd>
+        </div>
+        <div>
+          <dt>{t("stats.completed")}</dt>
+          <dd>
+            {new Intl.NumberFormat(locale).format(
+              counters?.torrentsCompleted ?? 0
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{t("stats.removed")}</dt>
+          <dd>{new Intl.NumberFormat(locale).format(counters?.torrentsRemoved ?? 0)}</dd>
+        </div>
+      </dl>
+    </section>
   );
 }
 
@@ -2714,20 +3443,28 @@ function TorrentContextMenu({
   t,
   onClose,
   onRunSpeedDoctor,
+  onCopyMagnet,
+  onOpenFolder,
+  onOpenFile,
   onPause,
   onResume,
   onRecheck,
-  onRemove
+  onRemove,
+  onRemoveData
 }: {
   contextMenu: { torrentId: string; x: number; y: number };
   torrent: TorrentSummary | undefined;
   t: (key: string) => string;
   onClose: () => void;
   onRunSpeedDoctor: (torrent: TorrentSummary) => void | Promise<void>;
+  onCopyMagnet: (id: string) => void | Promise<void>;
+  onOpenFolder: (id: string) => void | Promise<void>;
+  onOpenFile: (id: string) => void | Promise<void>;
   onPause: (id: string) => void | Promise<void>;
   onResume: (id: string) => void | Promise<void>;
   onRecheck: (id: string) => void | Promise<void>;
   onRemove: (id: string) => void | Promise<void>;
+  onRemoveData: (id: string) => void | Promise<void>;
 }) {
   if (!torrent) {
     return null;
@@ -2735,7 +3472,7 @@ function TorrentContextMenu({
 
   const style = {
     left: Math.min(contextMenu.x, window.innerWidth - 230),
-    top: Math.min(contextMenu.y, window.innerHeight - 230)
+    top: Math.min(contextMenu.y, window.innerHeight - 360)
   };
 
   const run = (action: () => void | Promise<void>) => {
@@ -2752,6 +3489,28 @@ function TorrentContextMenu({
         onClick={() => run(() => onRunSpeedDoctor(torrent))}
       >
         {t("action.whySlow")}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        onClick={() => run(() => onCopyMagnet(torrent.id))}
+      >
+        {t("action.copyMagnet")}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        onClick={() => run(() => onOpenFolder(torrent.id))}
+      >
+        {t("action.openFolder")}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        disabled={torrent.files.length === 0}
+        onClick={() => run(() => onOpenFile(torrent.id))}
+      >
+        {t("action.openFile")}
       </button>
       {torrent.status === "paused" ? (
         <button
@@ -2785,6 +3544,14 @@ function TorrentContextMenu({
         onClick={() => run(() => onRemove(torrent.id))}
       >
         {t("action.removeFromList")}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className="danger"
+        onClick={() => run(() => onRemoveData(torrent.id))}
+      >
+        {t("action.removeWithData")}
       </button>
     </div>
   );
@@ -2891,6 +3658,210 @@ function AppUpdatesPanel({
         </button>
       </div>
     </section>
+  );
+}
+
+function AppIntegrationPanel({
+  state,
+  draft,
+  t,
+  onChange,
+  onSave,
+  onRegisterDefaultHandlers
+}: {
+  state: AppIntegrationState | null;
+  draft: AppIntegrationSettings | null;
+  t: (key: string) => string;
+  onChange: (settings: AppIntegrationSettings) => void;
+  onSave: () => void | Promise<void>;
+  onRegisterDefaultHandlers: () => void | Promise<void>;
+}) {
+  if (!draft) {
+    return (
+      <section className="app-integration-settings">
+        <h2>{t("integration.title")}</h2>
+        <p>{t("integration.loading")}</p>
+      </section>
+    );
+  }
+
+  const update = (patch: Partial<AppIntegrationSettings>) => {
+    onChange({ ...draft, ...patch });
+  };
+  const notificationsDisabled =
+    !draft.notificationsEnabled || state?.notificationsSupported === false;
+
+  return (
+    <form
+      className="app-integration-settings"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void onSave();
+      }}
+    >
+      <div className="section-heading">
+        <h2>{t("integration.title")}</h2>
+        {state?.startup.launchedMinimized ? (
+          <span className="restart-badge ok-badge">
+            {t("integration.startedMinimized")}
+          </span>
+        ) : null}
+      </div>
+
+      <div className="integration-status-grid">
+        <p>
+          {t("integration.magnetStatus")}{" "}
+          <code>
+            {state?.defaultHandlers.magnetProtocolRegistered
+              ? t("integration.status.registered")
+              : t("integration.status.notRegistered")}
+          </code>
+        </p>
+        <p>
+          {t("integration.torrentStatus")}{" "}
+          <code>
+            {t(
+              `integration.fileAssociation.${
+                state?.defaultHandlers.torrentFileAssociation ?? "unsupported"
+              }`
+            )}
+          </code>
+        </p>
+        <p>
+          {t("integration.loginItemStatus")}{" "}
+          <code>
+            {state?.loginItem.openAtLogin ||
+            state?.loginItem.executableWillLaunchAtLogin
+              ? t("integration.status.enabled")
+              : t("integration.status.disabled")}
+          </code>
+        </p>
+      </div>
+
+      <label className="toggle-line">
+        <input
+          type="checkbox"
+          checked={draft.registerDefaultHandlers}
+          onChange={(event) =>
+            update({ registerDefaultHandlers: event.target.checked })
+          }
+        />
+        <span>{t("integration.registerDefaultHandlers")}</span>
+      </label>
+
+      <div className="toggle-grid two-columns">
+        <label>
+          <input
+            type="checkbox"
+            checked={draft.trayEnabled}
+            onChange={(event) => update({ trayEnabled: event.target.checked })}
+          />
+          <span>{t("integration.trayEnabled")}</span>
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={draft.closeToTray}
+            disabled={!draft.trayEnabled}
+            onChange={(event) => update({ closeToTray: event.target.checked })}
+          />
+          <span>{t("integration.closeToTray")}</span>
+        </label>
+      </div>
+
+      <div className="toggle-grid two-columns">
+        <label>
+          <input
+            type="checkbox"
+            checked={draft.launchAtLogin}
+            disabled={state?.loginItem.canManage === false}
+            onChange={(event) => update({ launchAtLogin: event.target.checked })}
+          />
+          <span>{t("integration.launchAtLogin")}</span>
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={draft.launchMinimized}
+            onChange={(event) => update({ launchMinimized: event.target.checked })}
+          />
+          <span>{t("integration.launchMinimized")}</span>
+        </label>
+      </div>
+
+      <label className="toggle-line">
+        <input
+          type="checkbox"
+          checked={draft.notificationsEnabled}
+          disabled={state?.notificationsSupported === false}
+          onChange={(event) =>
+            update({ notificationsEnabled: event.target.checked })
+          }
+        />
+        <span>{t("integration.notificationsEnabled")}</span>
+      </label>
+
+      <div className="toggle-grid two-columns">
+        <label>
+          <input
+            type="checkbox"
+            checked={draft.notifyOnTorrentCompleted}
+            disabled={notificationsDisabled}
+            onChange={(event) =>
+              update({ notifyOnTorrentCompleted: event.target.checked })
+            }
+          />
+          <span>{t("integration.notifyCompleted")}</span>
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={draft.notifyOnTorrentError}
+            disabled={notificationsDisabled}
+            onChange={(event) =>
+              update({ notifyOnTorrentError: event.target.checked })
+            }
+          />
+          <span>{t("integration.notifyErrors")}</span>
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={draft.notifyOnWatchFolderAdded}
+            disabled={notificationsDisabled}
+            onChange={(event) =>
+              update({ notifyOnWatchFolderAdded: event.target.checked })
+            }
+          />
+          <span>{t("integration.notifyWatch")}</span>
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={draft.notifyOnExternalAdd}
+            disabled={notificationsDisabled}
+            onChange={(event) =>
+              update({ notifyOnExternalAdd: event.target.checked })
+            }
+          />
+          <span>{t("integration.notifyExternal")}</span>
+        </label>
+      </div>
+
+      <p className="safety-note">{t("integration.splashNote")}</p>
+
+      <div className="row-actions">
+        <button type="submit">{t("action.saveIntegrationSettings")}</button>
+        <button
+          type="button"
+          className="secondary"
+          disabled={state?.defaultHandlers.canRegisterMagnetProtocol === false}
+          onClick={() => void onRegisterDefaultHandlers()}
+        >
+          {t("integration.registerNow")}
+        </button>
+      </div>
+    </form>
   );
 }
 
@@ -4298,7 +5269,8 @@ function TorrentFiles({
   torrent,
   locale,
   t,
-  onPriorityChange
+  onPriorityChange,
+  onOpenFile
 }: {
   torrent: TorrentSummary;
   locale: Locale;
@@ -4308,6 +5280,7 @@ function TorrentFiles({
     fileIndex: number,
     priority: TorrentFilePriority
   ) => void;
+  onOpenFile: (id: string, fileIndex: number) => void | Promise<void>;
 }) {
   const priorities: TorrentFilePriority[] = ["skip", "normal", "high"];
 
@@ -4332,23 +5305,32 @@ function TorrentFiles({
                   {formatPercent(file.progress, locale)}
                 </span>
               </div>
-              <select
-                value={file.priority}
-                aria-label={`${t("files.priority")} ${file.name}`}
-                onChange={(event) =>
-                  onPriorityChange(
-                    torrent.id,
-                    file.index,
-                    event.target.value as TorrentFilePriority
-                  )
-                }
-              >
-                {priorities.map((priority) => (
-                  <option value={priority} key={priority}>
-                    {t(`files.priority.${priority}`)}
-                  </option>
-                ))}
-              </select>
+              <div className="file-actions">
+                <select
+                  value={file.priority}
+                  aria-label={`${t("files.priority")} ${file.name}`}
+                  onChange={(event) =>
+                    onPriorityChange(
+                      torrent.id,
+                      file.index,
+                      event.target.value as TorrentFilePriority
+                    )
+                  }
+                >
+                  {priorities.map((priority) => (
+                    <option value={priority} key={priority}>
+                      {t(`files.priority.${priority}`)}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="secondary small-button"
+                  onClick={() => void onOpenFile(torrent.id, file.index)}
+                >
+                  {t("action.openFile")}
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -4379,6 +5361,13 @@ function applyCoreEvent(
     return {
       ...snapshot,
       torrents: upsertTorrent(snapshot.torrents, event.payload)
+    };
+  }
+
+  if (event.type === "torrent.removed") {
+    return {
+      ...snapshot,
+      torrents: snapshot.torrents.filter((torrent) => torrent.id !== event.payload.id)
     };
   }
 
@@ -4657,6 +5646,36 @@ function getAddOptions(
   };
 }
 
+function readStoredTorrentColumns(): TorrentColumnId[] {
+  try {
+    const value = window.localStorage.getItem(TORRENT_COLUMNS_STORAGE_KEY);
+    return normalizeTorrentColumns(value ? JSON.parse(value) : null);
+  } catch {
+    return DEFAULT_TORRENT_COLUMNS;
+  }
+}
+
+function storeTorrentColumns(columns: TorrentColumnId[]) {
+  try {
+    window.localStorage.setItem(
+      TORRENT_COLUMNS_STORAGE_KEY,
+      JSON.stringify(normalizeTorrentColumns(columns))
+    );
+  } catch {
+    // Local storage can be unavailable in restricted WebUI contexts.
+  }
+}
+
+function areTorrentColumnsEqual(
+  left: TorrentColumnId[],
+  right: TorrentColumnId[]
+) {
+  return (
+    left.length === right.length &&
+    left.every((columnId, index) => columnId === right[index])
+  );
+}
+
 function readStoredDownloadProfile(): DownloadProfileId {
   try {
     const value = window.localStorage.getItem(LAST_DOWNLOAD_PROFILE_KEY);
@@ -4864,6 +5883,140 @@ function parseTags(value: string) {
     .split(/[,;\n]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function parseMagnetUris(value: string) {
+  return Array.from(
+    new Set(
+      value
+        .split(/[\s\r\n]+/)
+        .map((item) => item.trim())
+        .filter((item) => item.startsWith("magnet:?"))
+    )
+  );
+}
+
+function createTorrentFilterOptions(torrents: TorrentSummary[]) {
+  return {
+    categories: Array.from(
+      new Set(torrents.map((torrent) => torrent.category).filter(Boolean))
+    ).sort() as string[],
+    tags: Array.from(new Set(torrents.flatMap((torrent) => torrent.tags))).sort(),
+    trackers: Array.from(
+      new Set(torrents.flatMap((torrent) => torrent.trackerHosts))
+    ).sort()
+  };
+}
+
+function filterAndSortTorrents(
+  torrents: TorrentSummary[],
+  filters: {
+    search: string;
+    status: TorrentStatusFilter;
+    category: string;
+    tag: string;
+    tracker: string;
+    sortId: TorrentSortId;
+  }
+) {
+  const search = filters.search.trim().toLowerCase();
+  const filtered = torrents.filter((torrent) => {
+    const searchable = [
+      torrent.name,
+      torrent.category ?? "",
+      ...torrent.tags,
+      ...torrent.trackerHosts
+    ].join(" ").toLowerCase();
+
+    return (
+      (!search || searchable.includes(search)) &&
+      (filters.status === "all" || torrent.status === filters.status) &&
+      (!filters.category || torrent.category === filters.category) &&
+      (!filters.tag || torrent.tags.includes(filters.tag)) &&
+      (!filters.tracker || torrent.trackerHosts.includes(filters.tracker))
+    );
+  });
+
+  return [...filtered].sort((left, right) =>
+    compareTorrents(left, right, filters.sortId)
+  );
+}
+
+function compareTorrents(
+  left: TorrentSummary,
+  right: TorrentSummary,
+  sortId: TorrentSortId
+) {
+  if (sortId === "name_asc") {
+    return left.name.localeCompare(right.name);
+  }
+
+  if (sortId === "status_asc") {
+    return left.status.localeCompare(right.status) || left.name.localeCompare(right.name);
+  }
+
+  if (sortId === "progress_desc") {
+    return right.progress - left.progress;
+  }
+
+  if (sortId === "speed_desc") {
+    return right.downloadSpeedBytes - left.downloadSpeedBytes;
+  }
+
+  if (sortId === "size_desc") {
+    return right.sizeBytes - left.sizeBytes;
+  }
+
+  return Date.parse(right.addedAt) - Date.parse(left.addedAt);
+}
+
+function formatTorrentColumnValue(
+  torrent: TorrentSummary,
+  columnId: TorrentColumnId,
+  locale: Locale,
+  t: (key: string) => string
+) {
+  if (columnId === "status") {
+    return t(`torrent.status.${torrent.status}`);
+  }
+
+  if (columnId === "progress") {
+    return formatPercent(torrent.progress, locale);
+  }
+
+  if (columnId === "size") {
+    return `${formatBytes(torrent.downloadedBytes)} / ${formatBytes(torrent.sizeBytes)}`;
+  }
+
+  if (columnId === "down") {
+    return formatSpeed(torrent.downloadSpeedBytes);
+  }
+
+  if (columnId === "up") {
+    return formatSpeed(torrent.uploadSpeedBytes);
+  }
+
+  if (columnId === "peers") {
+    return `${torrent.seeds}/${torrent.peers}`;
+  }
+
+  if (columnId === "eta") {
+    return formatEta(torrent.etaSeconds, t("torrent.etaUnknown"));
+  }
+
+  if (columnId === "category") {
+    return torrent.category ?? t("labels.noCategory");
+  }
+
+  if (columnId === "tags") {
+    return torrent.tags.length > 0 ? torrent.tags.join(", ") : t("labels.noTags");
+  }
+
+  if (columnId === "tracker") {
+    return torrent.trackerHosts[0] ?? t("trackers.none");
+  }
+
+  return formatDateTime(torrent.addedAt, locale);
 }
 
 function mergeTags(left: string[], right: string[]) {

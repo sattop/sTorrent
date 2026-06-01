@@ -4,6 +4,7 @@ export const CORE_EVENTS = [
   "torrent.progress.updated",
   "torrent.status.changed",
   "torrent.completed",
+  "torrent.removed",
   "torrent.labels.updated",
   "torrent.files.updated",
   "torrent.error",
@@ -26,6 +27,7 @@ export const CORE_EVENTS = [
 
 export const UI_COMMANDS = [
   "torrent.add",
+  "torrent.addUrl",
   "torrent.pause",
   "torrent.resume",
   "torrent.remove",

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import {
   AI_EVENT_CHANNEL,
   AI_IPC_CHANNELS,
@@ -22,12 +22,20 @@ import {
   type AppUpdateState
 } from "./appUpdateContracts.js";
 import {
+  APP_INTEGRATION_EVENT_CHANNEL,
+  APP_INTEGRATION_IPC_CHANNELS,
+  type AppIntegrationEvent,
+  type AppIntegrationSettings,
+  type AppIntegrationState
+} from "./appIntegrationContracts.js";
+import {
   ASSISTANT_IPC_CHANNELS,
   TORRENT_CORE_EVENT_CHANNEL,
   REMOTE_ACCESS_IPC_CHANNELS,
   TORRENT_IPC_CHANNELS,
   type AddMagnetRequest,
   type AddTorrentFileRequest,
+  type AddTorrentUrlRequest,
   type AssistantProfileApplyRequest,
   type AssistantScheduleSuggestion,
   type AssistantState,
@@ -37,8 +45,10 @@ import {
   type NetworkDiagnosticsReport,
   type NetworkSettings,
   type NetworkSettingsState,
+  type OpenTorrentFileRequest,
   type RemoteAccessSettings,
   type RemoteAccessSettingsState,
+  type RemoveTorrentRequest,
   type RunSpeedDoctorRequest,
   type SetTorrentFilePriorityRequest,
   type SpeedDoctorPortCheckResult,
@@ -46,7 +56,10 @@ import {
   type SpeedDoctorReportExport,
   type TorrentCoreEvent,
   type TorrentCoreResult,
+  type TorrentEventLogEntry,
+  type TorrentEventLogExport,
   type TorrentCoreSnapshot,
+  type TorrentStatistics,
   type TorrentSpeedDoctorReport,
   type TorrentSummary,
   type UpdateTorrentLabelsRequest,
@@ -62,6 +75,10 @@ contextBridge.exposeInMainWorld("storent", {
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.addTorrentFile, request) as Promise<
         TorrentCoreResult<TorrentSummary>
       >,
+    addTorrentUrl: (request: AddTorrentUrlRequest) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.addTorrentUrl, request) as Promise<
+        TorrentCoreResult<TorrentSummary>
+      >,
     addMagnet: (request: AddMagnetRequest) =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.addMagnet, request) as Promise<
         TorrentCoreResult<TorrentSummary>
@@ -74,13 +91,25 @@ contextBridge.exposeInMainWorld("storent", {
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.resume, id) as Promise<
         TorrentCoreResult<TorrentSummary>
       >,
-    remove: (id: string) =>
-      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.remove, id) as Promise<
+    remove: (request: string | RemoveTorrentRequest) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.remove, request) as Promise<
         TorrentCoreResult<TorrentCoreSnapshot>
       >,
     recheck: (id: string) =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.recheck, id) as Promise<
         TorrentCoreResult<TorrentSummary>
+      >,
+    copyMagnet: (id: string) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.copyMagnet, id) as Promise<
+        TorrentCoreResult<string>
+      >,
+    openTorrentFolder: (id: string) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.openTorrentFolder, id) as Promise<
+        TorrentCoreResult<true>
+      >,
+    openTorrentFile: (request: OpenTorrentFileRequest) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.openTorrentFile, request) as Promise<
+        TorrentCoreResult<true>
       >,
     updateLabels: (request: UpdateTorrentLabelsRequest) =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.updateLabels, request) as Promise<
@@ -97,6 +126,18 @@ contextBridge.exposeInMainWorld("storent", {
     getSnapshot: () =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.getSnapshot) as Promise<
         TorrentCoreResult<TorrentCoreSnapshot>
+      >,
+    getStatistics: () =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.getStatistics) as Promise<
+        TorrentCoreResult<TorrentStatistics>
+      >,
+    getEventLogs: () =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.getEventLogs) as Promise<
+        TorrentCoreResult<TorrentEventLogEntry[]>
+      >,
+    exportEventLogs: () =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.exportEventLogs) as Promise<
+        TorrentCoreResult<TorrentEventLogExport>
       >,
     getNetworkSettings: () =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.getNetworkSettings) as Promise<
@@ -143,6 +184,10 @@ contextBridge.exposeInMainWorld("storent", {
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.runWatchFolderScan) as Promise<
         TorrentCoreResult<WatchFolderScanResult>
       >,
+    getDroppedTorrentFilePaths: (files: File[]) =>
+      files
+        .map((file) => webUtils.getPathForFile(file))
+        .filter((filePath) => filePath.toLowerCase().endsWith(".torrent")),
     onEvent: (listener: (event: TorrentCoreEvent) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, event: TorrentCoreEvent) => {
         listener(event);
@@ -251,6 +296,34 @@ contextBridge.exposeInMainWorld("storent", {
       ipcRenderer.on(APP_UPDATE_EVENT_CHANNEL, handler);
       return () => {
         ipcRenderer.removeListener(APP_UPDATE_EVENT_CHANNEL, handler);
+      };
+    }
+  },
+  integration: {
+    getState: () =>
+      ipcRenderer.invoke(
+        APP_INTEGRATION_IPC_CHANNELS.getState
+      ) as Promise<AppIntegrationState>,
+    updateSettings: (settings: AppIntegrationSettings) =>
+      ipcRenderer.invoke(
+        APP_INTEGRATION_IPC_CHANNELS.updateSettings,
+        settings
+      ) as Promise<AppIntegrationState>,
+    registerDefaultHandlers: () =>
+      ipcRenderer.invoke(
+        APP_INTEGRATION_IPC_CHANNELS.registerDefaultHandlers
+      ) as Promise<AppIntegrationState>,
+    onEvent: (listener: (event: AppIntegrationEvent) => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        event: AppIntegrationEvent
+      ) => {
+        listener(event);
+      };
+
+      ipcRenderer.on(APP_INTEGRATION_EVENT_CHANNEL, handler);
+      return () => {
+        ipcRenderer.removeListener(APP_INTEGRATION_EVENT_CHANNEL, handler);
       };
     }
   }

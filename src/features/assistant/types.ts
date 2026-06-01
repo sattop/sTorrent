@@ -107,7 +107,7 @@ export interface SmartAssistantInput {
   trackerCount?: number;
   hasWebSeeds?: boolean;
   creationDateSeconds?: number | null;
-  sourceType?: "torrent_file" | "magnet";
+  sourceType?: "torrent_file" | "magnet" | "torrent_url";
 }
 
 export interface SmartAssistantRecommendation {
