@@ -44,6 +44,10 @@ export const TORRENT_CORE_EVENT_NAMES = [
   "torrent.removed",
   "torrent.labels.updated",
   "torrent.files.updated",
+  "torrent.details.updated",
+  "torrent.data.moved",
+  "torrent.announce.requested",
+  "torrent.queue.updated",
   "torrent.error",
   "assistant.health.computed",
   "assistant.schedule.suggestion",
@@ -68,14 +72,22 @@ export const TORRENT_IPC_CHANNELS = {
   addMagnet: "torrent:addMagnet",
   pause: "torrent:pause",
   resume: "torrent:resume",
+  forceStart: "torrent:forceStart",
   remove: "torrent:remove",
   recheck: "torrent:recheck",
+  rename: "torrent:rename",
+  moveData: "torrent:moveData",
+  reannounce: "torrent:reannounce",
+  exportTorrentFile: "torrent:exportTorrentFile",
   copyMagnet: "torrent:copyMagnet",
   openTorrentFolder: "torrent:openTorrentFolder",
   openTorrentFile: "torrent:openTorrentFile",
   updateLabels: "torrent:updateLabels",
   updateProfile: "torrent:updateProfile",
   setFilePriority: "torrent:setFilePriority",
+  setFilePriorities: "torrent:setFilePriorities",
+  commitPreparedAdd: "torrent:commitPreparedAdd",
+  updateQueuePosition: "torrent:updateQueuePosition",
   getSnapshot: "torrent:getSnapshot",
   getStatistics: "torrent:getStatistics",
   getEventLogs: "torrent:getEventLogs",
@@ -121,6 +133,16 @@ export type TorrentStatus =
   | "error";
 
 export type TorrentSourceType = "torrent_file" | "magnet" | "torrent_url";
+
+export type TorrentQueueRole = "download" | "seed";
+
+export type TorrentQueuedReason =
+  | "download_limit"
+  | "seed_limit"
+  | "manual"
+  | "selection_pending";
+
+export type TorrentQueueState = "active" | "queued" | "paused" | "unmanaged";
 
 export const TORRENT_FILE_PRIORITIES = ["skip", "normal", "high"] as const;
 
@@ -200,14 +222,42 @@ export interface TorrentFileInfo {
   selected: boolean;
 }
 
+export interface TorrentTrackerInfo {
+  url: string;
+  host: string;
+  protocol: string;
+  tier: number | null;
+}
+
+export interface TorrentHttpSourceInfo {
+  url: string;
+  host: string;
+  protocol: string;
+}
+
+export interface TorrentPeerInfo {
+  id: string;
+  address: string | null;
+  port: number | null;
+  clientName: string;
+  peerId: string | null;
+  type: string;
+  downloadSpeedBytes: number;
+  uploadSpeedBytes: number;
+  progress: number | null;
+  flags: string[];
+}
+
 export interface TorrentSummary {
   id: string;
   infoHash: string | null;
   name: string;
+  originalName: string | null;
   status: TorrentStatus;
   progress: number;
   sizeBytes: number;
   downloadedBytes: number;
+  uploadedBytes: number;
   downloadSpeedBytes: number;
   uploadSpeedBytes: number;
   seeds: number;
@@ -219,6 +269,11 @@ export interface TorrentSummary {
   sourceType: TorrentSourceType;
   selectedProfileId: DownloadProfileId;
   recheckAvailable: boolean;
+  forceStarted: boolean;
+  selectionPending: boolean;
+  canMoveData: boolean;
+  canReannounce: boolean;
+  canExportTorrent: boolean;
   category: string | null;
   tags: string[];
   files: TorrentFileInfo[];
@@ -227,13 +282,22 @@ export interface TorrentSummary {
   lastActivityAt: string | null;
   lastError: string | null;
   trackerHosts: string[];
+  trackers: TorrentTrackerInfo[];
+  httpSources: TorrentHttpSourceInfo[];
+  peerDetails: TorrentPeerInfo[];
   connectedSeeds: number;
+  queueRole: TorrentQueueRole;
+  queueState: TorrentQueueState;
+  queuePosition: number;
+  queuedReason: TorrentQueuedReason | null;
+  completedAt: string | null;
 }
 
 export interface TorrentAddOptions {
   downloadPath?: string;
   profileId?: DownloadProfileId;
   startPaused?: boolean;
+  selectFilesBeforeStart?: boolean;
   category?: string | null;
   tags?: string[];
   filePriorities?: Record<string, TorrentFilePriority>;
@@ -254,6 +318,41 @@ export interface AddMagnetRequest extends TorrentAddOptions {
 export interface RemoveTorrentRequest {
   id: string;
   deleteData?: boolean;
+}
+
+export interface RenameTorrentRequest {
+  id: string;
+  name: string;
+}
+
+export interface MoveTorrentDataRequest {
+  id: string;
+  destinationPath?: string;
+}
+
+export interface MoveTorrentDataResult {
+  torrent: TorrentSummary;
+  previousSavePath: string;
+  newSavePath: string;
+  movedFiles: number;
+}
+
+export interface ReannounceTorrentResult {
+  torrent: TorrentSummary;
+  announcedAt: string;
+  trackerCount: number;
+  method: "tracker.update" | "tracker.start";
+}
+
+export interface ExportTorrentFileRequest {
+  id: string;
+  targetPath?: string;
+}
+
+export interface ExportTorrentFileResult {
+  torrent: TorrentSummary;
+  exportPath: string;
+  source: "source_file" | "cached_url" | "metadata";
 }
 
 export interface OpenTorrentFileRequest {
@@ -282,6 +381,23 @@ export interface SetTorrentFilePriorityRequest {
   id: string;
   fileIndex: number;
   priority: TorrentFilePriority;
+}
+
+export interface SetTorrentFilePrioritiesRequest {
+  id: string;
+  priorities: Record<string, TorrentFilePriority>;
+}
+
+export interface CommitPreparedTorrentAddRequest {
+  id: string;
+  filePriorities?: Record<string, TorrentFilePriority>;
+  start?: boolean;
+  forceStart?: boolean;
+}
+
+export interface UpdateTorrentQueuePositionRequest {
+  id: string;
+  direction: "up" | "down" | "top" | "bottom";
 }
 
 export interface TorrentCoreSnapshot {
@@ -332,6 +448,11 @@ export interface SpeedLimitSettings {
   uploadBytesPerSecond: number | null;
 }
 
+export interface ConnectionLimitSettings {
+  maxConnections: number | null;
+  uploadSlots: number | null;
+}
+
 export interface NetworkInterfaceBindingSettings {
   name: string | null;
   bindOnly: boolean;
@@ -359,12 +480,15 @@ export interface NetworkSettings {
   natPmp: boolean;
   encryptionMode: BitTorrentEncryptionMode;
   speedLimits: SpeedLimitSettings;
+  connectionLimits: ConnectionLimitSettings;
   networkInterface: NetworkInterfaceBindingSettings;
   proxy: ProxySettings;
 }
 
 export interface NetworkCapabilities {
   globalSpeedLimits: boolean;
+  connectionLimits: boolean;
+  uploadSlots: boolean;
   dhtPexLsdAtStartup: boolean;
   incomingPortAtStartup: boolean;
   upnpNatPmpAtStartup: boolean;
@@ -414,8 +538,15 @@ export interface SeedingRuleSettings {
   enabled: boolean;
   ratioLimit: number | null;
   minutesAfterComplete: number | null;
-  action: "pause";
+  action: "pause" | "remove" | "limit";
+  uploadSlotLimit: number | null;
   requireConfirmationBeforeDataRemoval: true;
+}
+
+export interface QueueSettings {
+  enabled: boolean;
+  maxActiveDownloads: number | null;
+  maxActiveSeeds: number | null;
 }
 
 export interface RssAutoLoadRuleSettings {
@@ -448,6 +579,7 @@ export interface AutomationSettings {
   seedingRules: SeedingRuleSettings[];
   rssRules: RssAutoLoadRuleSettings[];
   speedSchedules: SpeedLimitScheduleSettings[];
+  queue: QueueSettings;
   hooksEnabled: false;
 }
 
@@ -455,6 +587,7 @@ export interface AutomationCapabilities {
   watchFolders: boolean;
   favoriteFolders: boolean;
   seedingRules: boolean;
+  queue: boolean;
   rssDuplicatePrevention: boolean;
   speedLimitSchedules: boolean;
   hooks: false;
@@ -695,6 +828,8 @@ export interface SpeedDoctorTechnicalDetails {
     natPmp: boolean;
     downloadLimitBytesPerSecond: number | null;
     uploadLimitBytesPerSecond: number | null;
+    maxConnections: number | null;
+    uploadSlots: number | null;
     proxyType: ProxyType;
     interfaceSelected: boolean;
     activeSpeedScheduleId: string | null;
@@ -800,6 +935,26 @@ export interface TorrentRemovedPayload {
   deleteData: boolean;
 }
 
+export interface TorrentDataMovedPayload {
+  id: string;
+  previousSavePath: string;
+  newSavePath: string;
+  movedFiles: number;
+  torrent: TorrentSummary;
+}
+
+export interface TorrentAnnounceRequestedPayload {
+  id: string;
+  announcedAt: string;
+  trackerCount: number;
+  method: ReannounceTorrentResult["method"];
+  torrent: TorrentSummary;
+}
+
+export interface TorrentQueueUpdatedPayload {
+  snapshot: TorrentCoreSnapshot;
+}
+
 export interface AssistantProfileAppliedPayload {
   id: string;
   profileId: DownloadProfileId;
@@ -864,6 +1019,10 @@ export interface TorrentCoreEventPayloadMap {
   "torrent.removed": TorrentRemovedPayload;
   "torrent.labels.updated": TorrentSummary;
   "torrent.files.updated": TorrentSummary;
+  "torrent.details.updated": TorrentSummary;
+  "torrent.data.moved": TorrentDataMovedPayload;
+  "torrent.announce.requested": TorrentAnnounceRequestedPayload;
+  "torrent.queue.updated": TorrentQueueUpdatedPayload;
   "torrent.error": TorrentCoreErrorPayload;
   "assistant.health.computed": AssistantHealthComputedPayload;
   "assistant.schedule.suggestion": AssistantScheduleSuggestionPayload;

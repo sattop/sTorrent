@@ -61,6 +61,7 @@ import type {
   TorrentCoreSnapshot,
   TorrentStatistics,
   TorrentFilePriority,
+  TorrentPeerInfo,
   TorrentSpeedDoctorReport,
   TorrentSummary,
   WatchFolderSettings
@@ -126,6 +127,23 @@ const torrentSortIds = [
 ] as const;
 type TorrentSortId = (typeof torrentSortIds)[number];
 
+const torrentDetailTabs = [
+  "general",
+  "trackers",
+  "httpSources",
+  "peers",
+  "content",
+  "speed"
+] as const;
+type TorrentDetailTab = (typeof torrentDetailTabs)[number];
+
+interface PreparedAddDialogState {
+  torrentId: string;
+  sourceLabel: string;
+  filePriorities: Record<string, TorrentFilePriority>;
+  forceStart: boolean;
+}
+
 export function App() {
   const [locale, setLocale] = useState<Locale>("ru");
   const [activeNav, setActiveNav] = useState<NavItem>("downloads");
@@ -142,6 +160,8 @@ export function App() {
     useState<TorrentSortId>("added_desc");
   const [visibleTorrentColumns, setVisibleTorrentColumns] =
     useState<TorrentColumnId[]>(() => readStoredTorrentColumns());
+  const [preparedAddDialog, setPreparedAddDialog] =
+    useState<PreparedAddDialogState | null>(null);
   const [selectedProfileId, setSelectedProfileId] =
     useState<DownloadProfileId>(() => readStoredDownloadProfile());
   const [categoryDraft, setCategoryDraft] = useState("");
@@ -624,6 +644,39 @@ export function App() {
   }, [networkState?.activeSettings.speedLimits.downloadBytesPerSecond, snapshot.torrents]);
 
   useEffect(() => {
+    if (!preparedAddDialog) {
+      return;
+    }
+
+    const torrent = snapshot.torrents.find(
+      (item) => item.id === preparedAddDialog.torrentId
+    );
+
+    if (!torrent || torrent.files.length === 0) {
+      return;
+    }
+
+    setPreparedAddDialog((current) => {
+      if (!current || current.torrentId !== torrent.id) {
+        return current;
+      }
+
+      const nextPriorities = { ...current.filePriorities };
+      let changed = false;
+
+      for (const file of torrent.files) {
+        const key = String(file.index);
+        if (!nextPriorities[key]) {
+          nextPriorities[key] = file.priority === "skip" ? "skip" : "normal";
+          changed = true;
+        }
+      }
+
+      return changed ? { ...current, filePriorities: nextPriorities } : current;
+    });
+  }, [preparedAddDialog, snapshot.torrents]);
+
+  useEffect(() => {
     const api = window.storent?.remoteAccess;
 
     if (!api) {
@@ -802,7 +855,7 @@ export function App() {
     setRemoteLoginMessage(getFriendlyError(result, t));
   }
 
-  async function addTorrentFile() {
+  async function prepareTorrentFile(filePath?: string) {
     const addOptions = getAddOptions(
       automationDraft,
       selectedFavoriteFolderId,
@@ -810,22 +863,26 @@ export function App() {
       tagsDraft
     );
     const result = await torrentApi.addTorrentFile({
+      filePath,
       profileId: selectedProfileId,
+      selectFilesBeforeStart: true,
       ...addOptions
     });
 
-    handleTorrentResult(result, t("message.torrentAdded"));
+    handlePreparedAddResult(result, filePath ?? t("add.source.file"));
   }
 
-  async function addTorrentUrl() {
+  async function prepareTorrentUrl() {
     if (!torrentUrl.trim()) {
       setStatusMessage(t("error.emptyTorrentUrl"));
       return;
     }
 
+    const url = torrentUrl.trim();
     const result = await torrentApi.addTorrentUrl({
-      url: torrentUrl.trim(),
+      url,
       profileId: selectedProfileId,
+      selectFilesBeforeStart: true,
       ...getAddOptions(
         automationDraft,
         selectedFavoriteFolderId,
@@ -834,14 +891,14 @@ export function App() {
       )
     });
 
-    handleTorrentResult(result, t("message.torrentAdded"));
+    handlePreparedAddResult(result, url);
 
     if (result?.ok) {
       setTorrentUrl("");
     }
   }
 
-  async function addMagnet(event: FormEvent<HTMLFormElement>) {
+  async function prepareMagnet(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const magnetUris = parseMagnetUris(magnetUri);
 
@@ -850,8 +907,14 @@ export function App() {
       return;
     }
 
+    await prepareMagnetUris(magnetUris);
+  }
+
+  async function prepareMagnetUris(magnetUris: string[]) {
     let addedCount = 0;
     let failedCount = 0;
+    let firstPreparedTorrent: TorrentSummary | null = null;
+    let firstSourceLabel = "";
     const addOptions = getAddOptions(
       automationDraft,
       selectedFavoriteFolderId,
@@ -863,17 +926,26 @@ export function App() {
       const result = await torrentApi.addMagnet({
         magnetUri: uri,
         profileId: selectedProfileId,
+        selectFilesBeforeStart: true,
         ...addOptions
       });
 
       if (result?.ok) {
         addedCount += 1;
+        firstPreparedTorrent ??= result.value;
+        firstSourceLabel ||= uri;
       } else {
         failedCount += 1;
         if (result) {
           handleResultError(result);
         }
       }
+    }
+
+    if (firstPreparedTorrent) {
+      setPreparedAddDialog(
+        createPreparedAddDialogState(firstPreparedTorrent, firstSourceLabel)
+      );
     }
 
     if (addedCount > 0) {
@@ -886,7 +958,7 @@ export function App() {
     }
   }
 
-  async function addDroppedTorrentFiles(files: File[]) {
+  async function prepareDroppedTorrentFiles(files: File[]) {
     const resolveFiles = window.storent?.torrent.getDroppedTorrentFilePaths;
 
     if (!resolveFiles) {
@@ -903,6 +975,8 @@ export function App() {
 
     let addedCount = 0;
     let failedCount = 0;
+    let firstPreparedTorrent: TorrentSummary | null = null;
+    let firstSourceLabel = "";
     const addOptions = getAddOptions(
       automationDraft,
       selectedFavoriteFolderId,
@@ -914,17 +988,26 @@ export function App() {
       const result = await torrentApi.addTorrentFile({
         filePath,
         profileId: selectedProfileId,
+        selectFilesBeforeStart: true,
         ...addOptions
       });
 
       if (result?.ok) {
         addedCount += 1;
+        firstPreparedTorrent ??= result.value;
+        firstSourceLabel ||= filePath;
       } else {
         failedCount += 1;
         if (result) {
           handleResultError(result);
         }
       }
+    }
+
+    if (firstPreparedTorrent) {
+      setPreparedAddDialog(
+        createPreparedAddDialogState(firstPreparedTorrent, firstSourceLabel)
+      );
     }
 
     if (addedCount > 0) {
@@ -936,6 +1019,68 @@ export function App() {
     }
   }
 
+  function handlePreparedAddResult(
+    result: TorrentCoreResult<TorrentSummary> | undefined,
+    sourceLabel: string
+  ) {
+    if (!result) {
+      setStatusMessage(t("core.unavailable"));
+      return;
+    }
+
+    if (result.ok) {
+      setSnapshot((current) => ({
+        ...current,
+        torrents: upsertTorrent(current.torrents, result.value)
+      }));
+      setPreparedAddDialog(
+        createPreparedAddDialogState(result.value, sourceLabel)
+      );
+      setStatusMessage(t("message.torrentPrepared"));
+      return;
+    }
+
+    handleResultError(result);
+  }
+
+  function openPreparedAddDialog(torrent: TorrentSummary, sourceLabel = torrent.name) {
+    setPreparedAddDialog(createPreparedAddDialogState(torrent, sourceLabel));
+    setStatusMessage(t("message.torrentPrepared"));
+  }
+
+  async function commitPreparedAdd(start: boolean) {
+    if (!preparedAddDialog) {
+      return;
+    }
+
+    const result = await torrentApi.commitPreparedAdd({
+      id: preparedAddDialog.torrentId,
+      filePriorities: preparedAddDialog.filePriorities,
+      start,
+      forceStart: preparedAddDialog.forceStart
+    });
+
+    if (result?.ok) {
+      setPreparedAddDialog(null);
+      setMetadataAssistantTorrentId(result.value.id);
+    }
+
+    handleTorrentResult(
+      result,
+      start ? t("message.torrentAdded") : t("message.torrentPreparedPaused")
+    );
+  }
+
+  async function cancelPreparedAdd() {
+    if (!preparedAddDialog) {
+      return;
+    }
+
+    const id = preparedAddDialog.torrentId;
+    setPreparedAddDialog(null);
+    await removeTorrent(id);
+  }
+
   async function pauseTorrent(id: string) {
     handleTorrentResult(
       await torrentApi.pause(id),
@@ -944,10 +1089,44 @@ export function App() {
   }
 
   async function resumeTorrent(id: string) {
+    const torrent = snapshot.torrents.find((item) => item.id === id);
+
+    if (torrent?.selectionPending) {
+      openPreparedAddDialog(torrent);
+      return;
+    }
+
     handleTorrentResult(
       await torrentApi.resume(id),
       t("message.torrentResumed")
     );
+  }
+
+  async function forceStartTorrent(id: string) {
+    handleTorrentResult(
+      await torrentApi.forceStart(id),
+      t("message.torrentForceStarted")
+    );
+  }
+
+  async function updateTorrentQueuePosition(
+    id: string,
+    direction: "up" | "down" | "top" | "bottom"
+  ) {
+    const result = await torrentApi.updateQueuePosition({ id, direction });
+
+    if (!result) {
+      setStatusMessage(t("core.unavailable"));
+      return;
+    }
+
+    if (result.ok) {
+      setSnapshot(result.value);
+      setStatusMessage(t("message.queueUpdated"));
+      return;
+    }
+
+    handleResultError(result);
   }
 
   async function removeTorrent(id: string, deleteData = false) {
@@ -978,6 +1157,69 @@ export function App() {
       await torrentApi.recheck(id),
       t("message.recheckStarted")
     );
+  }
+
+  async function renameTorrent(id: string, name: string) {
+    handleTorrentResult(
+      await torrentApi.rename({ id, name }),
+      t("message.torrentRenamed")
+    );
+  }
+
+  async function moveTorrentData(id: string) {
+    const result = await torrentApi.moveData({ id });
+
+    if (!result) {
+      setStatusMessage(t("core.unavailable"));
+      return;
+    }
+
+    if (result.ok) {
+      setSnapshot((current) => ({
+        ...current,
+        torrents: upsertTorrent(current.torrents, result.value.torrent)
+      }));
+      setStatusMessage(t("message.torrentDataMoved"));
+      return;
+    }
+
+    handleResultError(result);
+  }
+
+  async function reannounceTorrent(id: string) {
+    const result = await torrentApi.reannounce(id);
+
+    if (!result) {
+      setStatusMessage(t("core.unavailable"));
+      return;
+    }
+
+    if (result.ok) {
+      setSnapshot((current) => ({
+        ...current,
+        torrents: upsertTorrent(current.torrents, result.value.torrent)
+      }));
+      setStatusMessage(t("message.torrentReannounced"));
+      return;
+    }
+
+    handleResultError(result);
+  }
+
+  async function exportTorrentFile(id: string) {
+    const result = await torrentApi.exportTorrentFile({ id });
+
+    if (!result) {
+      setStatusMessage(t("core.unavailable"));
+      return;
+    }
+
+    if (result.ok) {
+      setStatusMessage(t("message.torrentExported"));
+      return;
+    }
+
+    handleResultError(result);
   }
 
   async function copyMagnet(id: string) {
@@ -2010,7 +2252,7 @@ export function App() {
               onDrop={(event) => {
                 event.preventDefault();
                 setIsTorrentDragActive(false);
-                void addDroppedTorrentFiles(Array.from(event.dataTransfer.files));
+                void prepareDroppedTorrentFiles(Array.from(event.dataTransfer.files));
               }}
             >
               <div>
@@ -2093,7 +2335,11 @@ export function App() {
               </div>
 
               <div className="actions">
-                <button type="button" onClick={addTorrentFile} disabled={isRemoteWeb}>
+                <button
+                  type="button"
+                  onClick={() => prepareTorrentFile()}
+                  disabled={isRemoteWeb}
+                >
                   {t("action.addTorrent")}
                 </button>
               </div>
@@ -2102,7 +2348,7 @@ export function App() {
                 className="magnet-form"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  void addTorrentUrl();
+                  void prepareTorrentUrl();
                 }}
               >
                 <label>
@@ -2118,7 +2364,7 @@ export function App() {
                 </button>
               </form>
 
-              <form className="magnet-form" onSubmit={addMagnet}>
+              <form className="magnet-form" onSubmit={prepareMagnet}>
                 <label>
                   <span>{t("add.magnetLabel")}</span>
                   <textarea
@@ -2250,30 +2496,41 @@ export function App() {
                       t={t}
                     />
 
-                    <TorrentLabelsEditor
-                      torrent={torrent}
-                      t={t}
-                      onSave={updateTorrentLabels}
-                    />
-
-                    <TorrentFiles
+                    <TorrentDetailsTabs
                       torrent={torrent}
                       locale={locale}
                       t={t}
+                      labelOptions={torrentFilterOptions}
+                      onRename={renameTorrent}
+                      onMoveData={moveTorrentData}
+                      onExportTorrent={exportTorrentFile}
+                      onReannounce={reannounceTorrent}
+                      onPrepareAdd={openPreparedAddDialog}
+                      onSaveLabels={updateTorrentLabels}
                       onPriorityChange={setTorrentFilePriority}
                       onOpenFile={openTorrentFile}
+                      isRemoteWeb={isRemoteWeb}
                     />
 
                     <div className="row-actions">
                       {torrent.status === "paused" ? (
                         <button type="button" onClick={() => resumeTorrent(torrent.id)}>
-                          {t("action.resume")}
+                          {torrent.selectionPending
+                            ? t("action.chooseFiles")
+                            : t("action.resume")}
                         </button>
                       ) : (
                         <button type="button" onClick={() => pauseTorrent(torrent.id)}>
                           {t("action.pause")}
                         </button>
                       )}
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => forceStartTorrent(torrent.id)}
+                      >
+                        {t("action.forceStart")}
+                      </button>
                       <button
                         type="button"
                         className="secondary"
@@ -2287,6 +2544,22 @@ export function App() {
                         onClick={() => copyMagnet(torrent.id)}
                       >
                         {t("action.copyMagnet")}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => reannounceTorrent(torrent.id)}
+                        disabled={!torrent.canReannounce}
+                      >
+                        {t("action.reannounce")}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => exportTorrentFile(torrent.id)}
+                        disabled={!torrent.canExportTorrent || isRemoteWeb}
+                      >
+                        {t("action.exportTorrent")}
                       </button>
                       <button
                         type="button"
@@ -2355,7 +2628,12 @@ export function App() {
             ) : null}
 
             {activeNav === "queue" ? (
-              <QueuePanel snapshot={snapshot} locale={locale} t={t} />
+              <QueuePanel
+                snapshot={snapshot}
+                locale={locale}
+                t={t}
+                onMove={updateTorrentQueuePosition}
+              />
             ) : null}
 
             {activeNav === "files" ? (
@@ -2506,6 +2784,52 @@ export function App() {
           </aside>
         </section>
 
+        {preparedAddDialog ? (
+          <PreparedAddDialog
+            dialog={preparedAddDialog}
+            torrent={snapshot.torrents.find(
+              (torrent) => torrent.id === preparedAddDialog.torrentId
+            )}
+            locale={locale}
+            t={t}
+            onPriorityChange={(fileIndex, priority) =>
+              setPreparedAddDialog((current) =>
+                current
+                  ? {
+                      ...current,
+                      filePriorities: {
+                        ...current.filePriorities,
+                        [String(fileIndex)]: priority
+                      }
+                    }
+                  : current
+              )
+            }
+            onBulkPriorityChange={(priority) =>
+              setPreparedAddDialog((current) =>
+                current
+                  ? {
+                      ...current,
+                      filePriorities: createBulkPreparedPriorities(
+                        snapshot.torrents.find(
+                          (torrent) => torrent.id === current.torrentId
+                        ),
+                        priority
+                      )
+                    }
+                  : current
+              )
+            }
+            onForceStartChange={(forceStart) =>
+              setPreparedAddDialog((current) =>
+                current ? { ...current, forceStart } : current
+              )
+            }
+            onCancel={() => void cancelPreparedAdd()}
+            onCommit={(start) => void commitPreparedAdd(start)}
+          />
+        ) : null}
+
         {contextMenu ? (
           <TorrentContextMenu
             contextMenu={contextMenu}
@@ -2522,9 +2846,14 @@ export function App() {
             onOpenFile={(id) => openTorrentFile(id, 0)}
             onPause={pauseTorrent}
             onResume={resumeTorrent}
+            onForceStart={forceStartTorrent}
             onRecheck={recheckTorrent}
+            onReannounce={reannounceTorrent}
+            onExportTorrent={exportTorrentFile}
+            onMoveData={moveTorrentData}
             onRemove={removeTorrent}
             onRemoveData={(id) => removeTorrent(id, true)}
+            isRemoteWeb={isRemoteWeb}
           />
         ) : null}
       </section>
@@ -2726,32 +3055,634 @@ function TorrentColumnStrip({
   );
 }
 
+function PreparedAddDialog({
+  dialog,
+  torrent,
+  locale,
+  t,
+  onPriorityChange,
+  onBulkPriorityChange,
+  onForceStartChange,
+  onCancel,
+  onCommit
+}: {
+  dialog: PreparedAddDialogState;
+  torrent: TorrentSummary | undefined;
+  locale: Locale;
+  t: (key: string) => string;
+  onPriorityChange: (
+    fileIndex: number,
+    priority: TorrentFilePriority
+  ) => void;
+  onBulkPriorityChange: (priority: TorrentFilePriority) => void;
+  onForceStartChange: (forceStart: boolean) => void;
+  onCancel: () => void;
+  onCommit: (start: boolean) => void;
+}) {
+  const files = torrent?.files ?? [];
+  const selectedFiles = files.filter(
+    (file) => dialog.filePriorities[String(file.index)] !== "skip"
+  );
+  const selectedBytes = selectedFiles.reduce(
+    (total, file) => total + file.lengthBytes,
+    0
+  );
+  const metadataReady = Boolean(torrent?.metadataReady && files.length > 0);
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="prepared-add-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("add.dialog.title")}
+      >
+        <div className="dialog-heading">
+          <div>
+            <p className="eyebrow">{dialog.sourceLabel}</p>
+            <h2>{torrent?.name ?? t("add.dialog.title")}</h2>
+          </div>
+          <button type="button" className="secondary small-button" onClick={onCancel}>
+            {t("action.cancel")}
+          </button>
+        </div>
+
+        <dl className="torrent-stats prepared-summary">
+          <div>
+            <dt>{t("files.selected")}</dt>
+            <dd>
+              {selectedFiles.length} / {files.length}
+            </dd>
+          </div>
+          <div>
+            <dt>{t("torrent.column.size")}</dt>
+            <dd>{formatBytes(selectedBytes)}</dd>
+          </div>
+          <div>
+            <dt>{t("torrent.column.status")}</dt>
+            <dd>
+              {torrent ? t(`torrent.status.${torrent.status}`) : t("details.pending")}
+            </dd>
+          </div>
+        </dl>
+
+        <div className="prepared-toolbar">
+          <button
+            type="button"
+            className="secondary small-button"
+            disabled={!metadataReady}
+            onClick={() => onBulkPriorityChange("normal")}
+          >
+            {t("files.selectAll")}
+          </button>
+          <button
+            type="button"
+            className="secondary small-button"
+            disabled={!metadataReady}
+            onClick={() => onBulkPriorityChange("skip")}
+          >
+            {t("files.selectNone")}
+          </button>
+          <button
+            type="button"
+            className="secondary small-button"
+            disabled={!metadataReady}
+            onClick={() => onBulkPriorityChange("high")}
+          >
+            {t("files.priority.high")}
+          </button>
+          <label className="force-toggle">
+            <input
+              type="checkbox"
+              checked={dialog.forceStart}
+              onChange={(event) => onForceStartChange(event.target.checked)}
+            />
+            <span>{t("action.forceStart")}</span>
+          </label>
+        </div>
+
+        {!metadataReady ? (
+          <p className="file-pending">{t("add.dialog.metadataPending")}</p>
+        ) : (
+          <div className="prepared-file-list">
+            {files.map((file) => {
+              const priority =
+                dialog.filePriorities[String(file.index)] ?? file.priority;
+              return (
+                <div className="file-row" key={`${dialog.torrentId}-${file.index}`}>
+                  <div className="file-main">
+                    <strong>{file.path || file.name}</strong>
+                    <span>{formatBytes(file.lengthBytes)}</span>
+                  </div>
+                  <div className="file-actions">
+                    <select
+                      value={priority}
+                      onChange={(event) =>
+                        onPriorityChange(
+                          file.index,
+                          event.target.value as TorrentFilePriority
+                        )
+                      }
+                    >
+                      {TORRENT_FILE_PRIORITIES.map((item) => (
+                        <option value={item} key={item}>
+                          {t(`files.priority.${item}`)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="dialog-actions">
+          <button
+            type="button"
+            className="secondary"
+            disabled={!metadataReady}
+            onClick={() => onCommit(false)}
+          >
+            {t("action.keepPaused")}
+          </button>
+          <button
+            type="button"
+            disabled={!metadataReady || selectedFiles.length === 0}
+            onClick={() => onCommit(true)}
+          >
+            {t("action.startSelected")}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TorrentDetailsTabs({
+  torrent,
+  locale,
+  t,
+  labelOptions,
+  onRename,
+  onMoveData,
+  onExportTorrent,
+  onReannounce,
+  onPrepareAdd,
+  onSaveLabels,
+  onPriorityChange,
+  onOpenFile,
+  isRemoteWeb
+}: {
+  torrent: TorrentSummary;
+  locale: Locale;
+  t: (key: string) => string;
+  labelOptions: ReturnType<typeof createTorrentFilterOptions>;
+  onRename: (id: string, name: string) => void | Promise<void>;
+  onMoveData: (id: string) => void | Promise<void>;
+  onExportTorrent: (id: string) => void | Promise<void>;
+  onReannounce: (id: string) => void | Promise<void>;
+  onPrepareAdd: (torrent: TorrentSummary) => void;
+  onSaveLabels: (id: string, category: string, tags: string) => void;
+  onPriorityChange: (
+    id: string,
+    fileIndex: number,
+    priority: TorrentFilePriority
+  ) => void;
+  onOpenFile: (id: string, fileIndex: number) => void | Promise<void>;
+  isRemoteWeb: boolean;
+}) {
+  const [activeTab, setActiveTab] = useState<TorrentDetailTab>("general");
+
+  return (
+    <section className="torrent-detail-tabs">
+      <div className="tab-list" role="tablist" aria-label={t("details.tabs")}>
+        {torrentDetailTabs.map((tab) => (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab}
+            className={activeTab === tab ? "active" : ""}
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+          >
+            {t(`details.tab.${tab}`)}
+          </button>
+        ))}
+      </div>
+
+      <div className="tab-panel" role="tabpanel">
+        {activeTab === "general" ? (
+          <TorrentGeneralTab
+            torrent={torrent}
+            locale={locale}
+            t={t}
+            labelOptions={labelOptions}
+            onRename={onRename}
+            onMoveData={onMoveData}
+            onExportTorrent={onExportTorrent}
+            onReannounce={onReannounce}
+            onPrepareAdd={onPrepareAdd}
+            onSaveLabels={onSaveLabels}
+            isRemoteWeb={isRemoteWeb}
+          />
+        ) : null}
+        {activeTab === "trackers" ? (
+          <TrackersTab torrent={torrent} t={t} />
+        ) : null}
+        {activeTab === "httpSources" ? (
+          <HttpSourcesTab torrent={torrent} t={t} />
+        ) : null}
+        {activeTab === "peers" ? (
+          <PeersTab torrent={torrent} locale={locale} t={t} />
+        ) : null}
+        {activeTab === "content" ? (
+          <TorrentFiles
+            torrent={torrent}
+            locale={locale}
+            t={t}
+            onPriorityChange={onPriorityChange}
+            onOpenFile={onOpenFile}
+          />
+        ) : null}
+        {activeTab === "speed" ? (
+          <SpeedTab torrent={torrent} locale={locale} t={t} />
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function TorrentGeneralTab({
+  torrent,
+  locale,
+  t,
+  labelOptions,
+  onRename,
+  onMoveData,
+  onExportTorrent,
+  onReannounce,
+  onPrepareAdd,
+  onSaveLabels,
+  isRemoteWeb
+}: {
+  torrent: TorrentSummary;
+  locale: Locale;
+  t: (key: string) => string;
+  labelOptions: ReturnType<typeof createTorrentFilterOptions>;
+  onRename: (id: string, name: string) => void | Promise<void>;
+  onMoveData: (id: string) => void | Promise<void>;
+  onExportTorrent: (id: string) => void | Promise<void>;
+  onReannounce: (id: string) => void | Promise<void>;
+  onPrepareAdd: (torrent: TorrentSummary) => void;
+  onSaveLabels: (id: string, category: string, tags: string) => void;
+  isRemoteWeb: boolean;
+}) {
+  const savedName = torrent.name;
+  const [name, setName] = useState(savedName);
+
+  useEffect(() => {
+    setName(savedName);
+  }, [savedName, torrent.id]);
+
+  return (
+    <div className="details-grid">
+      <section className="detail-block">
+        <div className="section-heading">
+          <h3>{t("details.general.identity")}</h3>
+          {torrent.forceStarted ? (
+            <span className="flag-pill">{t("details.forceStarted")}</span>
+          ) : null}
+        </div>
+        <label className="rename-field">
+          <span>{t("details.name")}</span>
+          <input value={name} onChange={(event) => setName(event.target.value)} />
+          <button
+            type="button"
+            className="secondary small-button"
+            disabled={name.trim() === savedName.trim() || !name.trim()}
+            onClick={() => onRename(torrent.id, name)}
+          >
+            {t("action.rename")}
+          </button>
+        </label>
+        <dl className="detail-list">
+          <div>
+            <dt>{t("details.infoHash")}</dt>
+            <dd>{torrent.infoHash ?? t("details.pending")}</dd>
+          </div>
+          <div>
+            <dt>{t("details.savePath")}</dt>
+            <dd>{torrent.savePath}</dd>
+          </div>
+          <div>
+            <dt>{t("details.addedAt")}</dt>
+            <dd>{formatDateTime(torrent.addedAt, locale)}</dd>
+          </div>
+          <div>
+            <dt>{t("details.metadataAt")}</dt>
+            <dd>
+              {torrent.metadataReceivedAt
+                ? formatDateTime(torrent.metadataReceivedAt, locale)
+                : t("details.pending")}
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="detail-block">
+        <div className="section-heading">
+          <h3>{t("labels.title")}</h3>
+        </div>
+        <TorrentLabelsEditor
+          torrent={torrent}
+          t={t}
+          knownCategories={labelOptions.categories}
+          knownTags={labelOptions.tags}
+          onSave={onSaveLabels}
+        />
+      </section>
+
+      <section className="detail-block detail-actions-block">
+        <div className="section-heading">
+          <h3>{t("details.commands")}</h3>
+        </div>
+        <div className="row-actions compact-actions">
+          {torrent.selectionPending ? (
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => onPrepareAdd(torrent)}
+            >
+              {t("action.chooseFiles")}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="secondary"
+            disabled={!torrent.canReannounce}
+            onClick={() => onReannounce(torrent.id)}
+          >
+            {t("action.reannounce")}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            disabled={isRemoteWeb || !torrent.canExportTorrent}
+            onClick={() => onExportTorrent(torrent.id)}
+          >
+            {t("action.exportTorrent")}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            disabled={isRemoteWeb || !torrent.canMoveData}
+            onClick={() => onMoveData(torrent.id)}
+          >
+            {t("action.moveData")}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TrackersTab({
+  torrent,
+  t
+}: {
+  torrent: TorrentSummary;
+  t: (key: string) => string;
+}) {
+  if (torrent.trackers.length === 0) {
+    return <p className="file-pending">{t("trackers.none")}</p>;
+  }
+
+  return (
+    <div className="detail-table">
+      {torrent.trackers.map((tracker) => (
+        <div className="detail-table-row" key={tracker.url}>
+          <strong>{tracker.host}</strong>
+          <span>{tracker.protocol.toUpperCase()}</span>
+          <code>{tracker.url}</code>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function HttpSourcesTab({
+  torrent,
+  t
+}: {
+  torrent: TorrentSummary;
+  t: (key: string) => string;
+}) {
+  if (torrent.httpSources.length === 0) {
+    return <p className="file-pending">{t("httpSources.none")}</p>;
+  }
+
+  return (
+    <div className="detail-table">
+      {torrent.httpSources.map((source) => (
+        <div className="detail-table-row" key={source.url}>
+          <strong>{source.host}</strong>
+          <span>{source.protocol.toUpperCase()}</span>
+          <code>{source.url}</code>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PeersTab({
+  torrent,
+  locale,
+  t
+}: {
+  torrent: TorrentSummary;
+  locale: Locale;
+  t: (key: string) => string;
+}) {
+  if (torrent.peerDetails.length === 0) {
+    return <p className="file-pending">{t("peers.none")}</p>;
+  }
+
+  return (
+    <div className="peer-table">
+      <div className="peer-table-head">
+        <span>{t("peers.address")}</span>
+        <span>{t("peers.client")}</span>
+        <span>{t("peers.speed")}</span>
+        <span>{t("peers.flags")}</span>
+      </div>
+      {torrent.peerDetails.map((peer) => (
+        <PeerRow peer={peer} locale={locale} t={t} key={peer.id} />
+      ))}
+    </div>
+  );
+}
+
+function PeerRow({
+  peer,
+  locale,
+  t
+}: {
+  peer: TorrentPeerInfo;
+  locale: Locale;
+  t: (key: string) => string;
+}) {
+  return (
+    <div className="peer-table-row">
+      <span>
+        {peer.address ?? t("peers.unknownAddress")}
+        {peer.port ? `:${peer.port}` : ""}
+      </span>
+      <span>{peer.clientName}</span>
+      <span>
+        {formatSpeed(peer.downloadSpeedBytes)} / {formatSpeed(peer.uploadSpeedBytes)}
+        {peer.progress !== null ? ` · ${formatPercent(peer.progress, locale)}` : ""}
+      </span>
+      <span className="flag-list">
+        {peer.flags.length > 0
+          ? peer.flags.map((flag) => (
+              <span className="flag-pill" key={flag}>
+                {formatPeerFlag(flag, t)}
+              </span>
+            ))
+          : t("peers.noFlags")}
+      </span>
+    </div>
+  );
+}
+
+function SpeedTab({
+  torrent,
+  locale,
+  t
+}: {
+  torrent: TorrentSummary;
+  locale: Locale;
+  t: (key: string) => string;
+}) {
+  const ratio =
+    torrent.downloadedBytes > 0
+      ? torrent.uploadedBytes / torrent.downloadedBytes
+      : 0;
+
+  return (
+    <dl className="torrent-stats speed-grid">
+      <div>
+        <dt>{t("metric.download")}</dt>
+        <dd>{formatSpeed(torrent.downloadSpeedBytes)}</dd>
+      </div>
+      <div>
+        <dt>{t("metric.upload")}</dt>
+        <dd>{formatSpeed(torrent.uploadSpeedBytes)}</dd>
+      </div>
+      <div>
+        <dt>{t("details.downloaded")}</dt>
+        <dd>{formatBytes(torrent.downloadedBytes)}</dd>
+      </div>
+      <div>
+        <dt>{t("details.uploaded")}</dt>
+        <dd>{formatBytes(torrent.uploadedBytes)}</dd>
+      </div>
+      <div>
+        <dt>{t("details.ratio")}</dt>
+        <dd>{new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(ratio)}</dd>
+      </div>
+      <div>
+        <dt>{t("torrent.column.eta")}</dt>
+        <dd>{formatEta(torrent.etaSeconds, t("torrent.etaUnknown"))}</dd>
+      </div>
+    </dl>
+  );
+}
+
 function QueuePanel({
   snapshot,
   locale,
-  t
+  t,
+  onMove
 }: {
   snapshot: TorrentCoreSnapshot;
   locale: Locale;
   t: (key: string) => string;
+  onMove: (
+    id: string,
+    direction: "up" | "down" | "top" | "bottom"
+  ) => void | Promise<void>;
 }) {
+  const downloads = snapshot.torrents
+    .filter((torrent) => torrent.queueRole === "download")
+    .sort(compareTorrentQueuePosition);
+  const seeds = snapshot.torrents
+    .filter((torrent) => torrent.queueRole === "seed")
+    .sort(compareTorrentQueuePosition);
+
   return (
     <article className="add-panel view-panel">
       <h2>{t("nav.queue")}</h2>
       {snapshot.torrents.length === 0 ? (
         <p>{t("empty.description")}</p>
       ) : (
-        <div className="torrent-list" aria-label={t("nav.queue")}>
-          {snapshot.torrents.map((torrent) => (
+        <div className="queue-sections" aria-label={t("nav.queue")}>
+          <div className="queue-summary">
+            <span>
+              {t("queue.downloads")}: {downloads.length}
+            </span>
+            <span>
+              {t("queue.seeds")}: {seeds.length}
+            </span>
+          </div>
+          {[...downloads, ...seeds].map((torrent) => (
             <div className="queue-row" key={torrent.id}>
               <div>
-                <strong>{torrent.name}</strong>
+                <strong>
+                  {t(`queue.${torrent.queueRole}`)} {torrent.queuePosition}.{" "}
+                  {torrent.name}
+                </strong>
                 <span>
+                  {t(`queue.state.${torrent.queueState}`)} /{" "}
                   {t(`torrent.status.${torrent.status}`)} ·{" "}
                   {formatPercent(torrent.progress, locale)}
+                  {torrent.queuedReason
+                    ? ` / ${t(`queue.reason.${torrent.queuedReason}`)}`
+                    : ""}
                 </span>
               </div>
               <span>{formatEta(torrent.etaSeconds, t("torrent.etaUnknown"))}</span>
+              <div className="queue-actions">
+                <button
+                  type="button"
+                  className="secondary small-button"
+                  onClick={() => onMove(torrent.id, "top")}
+                >
+                  {t("queue.action.top")}
+                </button>
+                <button
+                  type="button"
+                  className="secondary small-button"
+                  onClick={() => onMove(torrent.id, "up")}
+                >
+                  {t("queue.action.up")}
+                </button>
+                <button
+                  type="button"
+                  className="secondary small-button"
+                  onClick={() => onMove(torrent.id, "down")}
+                >
+                  {t("queue.action.down")}
+                </button>
+                <button
+                  type="button"
+                  className="secondary small-button"
+                  onClick={() => onMove(torrent.id, "bottom")}
+                >
+                  {t("queue.action.bottom")}
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -3322,7 +4253,7 @@ function SpeedDoctorReportCard({
       ) : null}
       <div className="doctor-snapshot">
         <span>
-          {t(`speedDoctor.scanMode.${report.scanMode}`)} В· {report.durationMs} ms
+          {t(`speedDoctor.scanMode.${report.scanMode}`)} · {report.durationMs} ms
         </span>
         <span>
           {t("speedDoctor.port")}:{" "}
@@ -3448,9 +4379,14 @@ function TorrentContextMenu({
   onOpenFile,
   onPause,
   onResume,
+  onForceStart,
   onRecheck,
+  onReannounce,
+  onExportTorrent,
+  onMoveData,
   onRemove,
-  onRemoveData
+  onRemoveData,
+  isRemoteWeb
 }: {
   contextMenu: { torrentId: string; x: number; y: number };
   torrent: TorrentSummary | undefined;
@@ -3462,9 +4398,14 @@ function TorrentContextMenu({
   onOpenFile: (id: string) => void | Promise<void>;
   onPause: (id: string) => void | Promise<void>;
   onResume: (id: string) => void | Promise<void>;
+  onForceStart: (id: string) => void | Promise<void>;
   onRecheck: (id: string) => void | Promise<void>;
+  onReannounce: (id: string) => void | Promise<void>;
+  onExportTorrent: (id: string) => void | Promise<void>;
+  onMoveData: (id: string) => void | Promise<void>;
   onRemove: (id: string) => void | Promise<void>;
   onRemoveData: (id: string) => void | Promise<void>;
+  isRemoteWeb: boolean;
 }) {
   if (!torrent) {
     return null;
@@ -3518,7 +4459,7 @@ function TorrentContextMenu({
           role="menuitem"
           onClick={() => run(() => onResume(torrent.id))}
         >
-          {t("action.resume")}
+          {torrent.selectionPending ? t("action.chooseFiles") : t("action.resume")}
         </button>
       ) : (
         <button
@@ -3532,10 +4473,41 @@ function TorrentContextMenu({
       <button
         type="button"
         role="menuitem"
+        onClick={() => run(() => onForceStart(torrent.id))}
+      >
+        {t("action.forceStart")}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
         disabled={!torrent.recheckAvailable}
         onClick={() => run(() => onRecheck(torrent.id))}
       >
         {t("action.recheck")}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        disabled={!torrent.canReannounce}
+        onClick={() => run(() => onReannounce(torrent.id))}
+      >
+        {t("action.reannounce")}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        disabled={isRemoteWeb || !torrent.canExportTorrent}
+        onClick={() => run(() => onExportTorrent(torrent.id))}
+      >
+        {t("action.exportTorrent")}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        disabled={isRemoteWeb || !torrent.canMoveData}
+        onClick={() => run(() => onMoveData(torrent.id))}
+      >
+        {t("action.moveData")}
       </button>
       <button
         type="button"
@@ -4120,6 +5092,16 @@ function NetworkSettingsPanel({
       }
     });
   };
+  const updateConnectionLimits = (
+    limits: Partial<NetworkSettings["connectionLimits"]>
+  ) => {
+    update({
+      connectionLimits: {
+        ...networkDraft.connectionLimits,
+        ...limits
+      }
+    });
+  };
   const updateInterface = (
     networkInterface: Partial<NetworkSettings["networkInterface"]>
   ) => {
@@ -4240,6 +5222,37 @@ function NetworkSettingsPanel({
             onChange={(event) =>
               updateLimits({
                 uploadBytesPerSecond: parseKilobyteLimit(event.target.value)
+              })
+            }
+          />
+        </label>
+      </div>
+
+      <div className="limit-grid">
+        <label className="control-field">
+          <span>{t("networkSettings.maxConnections")}</span>
+          <input
+            inputMode="numeric"
+            min={0}
+            type="number"
+            value={networkDraft.connectionLimits.maxConnections ?? ""}
+            onChange={(event) =>
+              updateConnectionLimits({
+                maxConnections: parseOptionalInteger(event.target.value)
+              })
+            }
+          />
+        </label>
+        <label className="control-field">
+          <span>{t("networkSettings.uploadSlots")}</span>
+          <input
+            inputMode="numeric"
+            min={0}
+            type="number"
+            value={networkDraft.connectionLimits.uploadSlots ?? ""}
+            onChange={(event) =>
+              updateConnectionLimits({
+                uploadSlots: parseOptionalInteger(event.target.value)
               })
             }
           />
@@ -4575,6 +5588,14 @@ function AutomationPanel({
       seedingRules: replaceById(automationDraft.seedingRules, id, patch)
     });
   };
+  const updateQueue = (patch: Partial<AutomationSettings["queue"]>) => {
+    update({
+      queue: {
+        ...automationDraft.queue,
+        ...patch
+      }
+    });
+  };
   const updateRssRule = (
     id: string,
     patch: Partial<RssAutoLoadRuleSettings>
@@ -4714,6 +5735,48 @@ function AutomationPanel({
             </button>
           </div>
         ))}
+      </section>
+
+      <section className="automation-section" aria-label={t("automation.queue.title")}>
+        <div className="section-heading">
+          <h3>{t("automation.queue.title")}</h3>
+        </div>
+        <label className="toggle-line">
+          <input
+            type="checkbox"
+            checked={automationDraft.queue.enabled}
+            onChange={(event) => updateQueue({ enabled: event.target.checked })}
+          />
+          <span>{t("automation.queue.enabled")}</span>
+        </label>
+        <div className="limit-grid">
+          <label className="control-field">
+            <span>{t("automation.queue.maxDownloads")}</span>
+            <input
+              type="number"
+              min={0}
+              value={automationDraft.queue.maxActiveDownloads ?? ""}
+              onChange={(event) =>
+                updateQueue({
+                  maxActiveDownloads: parseOptionalInteger(event.target.value)
+                })
+              }
+            />
+          </label>
+          <label className="control-field">
+            <span>{t("automation.queue.maxSeeds")}</span>
+            <input
+              type="number"
+              min={0}
+              value={automationDraft.queue.maxActiveSeeds ?? ""}
+              onChange={(event) =>
+                updateQueue({
+                  maxActiveSeeds: parseOptionalInteger(event.target.value)
+                })
+              }
+            />
+          </label>
+        </div>
       </section>
 
       <section
@@ -4868,6 +5931,39 @@ function AutomationPanel({
                       minutesAfterComplete: parseOptionalInteger(
                         event.target.value
                       )
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <div className="limit-grid">
+              <label className="control-field">
+                <span>{t("automation.seed.action")}</span>
+                <select
+                  value={rule.action}
+                  onChange={(event) =>
+                    updateSeedingRule(rule.id, {
+                      action: event.target.value as SeedingRuleSettings["action"]
+                    })
+                  }
+                >
+                  {["pause", "remove", "limit"].map((action) => (
+                    <option value={action} key={action}>
+                      {t(`automation.seed.action.${action}`)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="control-field">
+                <span>{t("automation.seed.uploadSlotLimit")}</span>
+                <input
+                  type="number"
+                  min={1}
+                  disabled={rule.action !== "limit"}
+                  value={rule.uploadSlotLimit ?? ""}
+                  onChange={(event) =>
+                    updateSeedingRule(rule.id, {
+                      uploadSlotLimit: parseOptionalInteger(event.target.value)
                     })
                   }
                 />
@@ -5217,10 +6313,14 @@ function TorrentSpeedDiagnosticsPanel({
 function TorrentLabelsEditor({
   torrent,
   t,
+  knownCategories = [],
+  knownTags = [],
   onSave
 }: {
   torrent: TorrentSummary;
   t: (key: string) => string;
+  knownCategories?: string[];
+  knownTags?: string[];
   onSave: (id: string, category: string, tags: string) => void;
 }) {
   const savedCategory = torrent.category ?? "";
@@ -5234,16 +6334,31 @@ function TorrentLabelsEditor({
   }, [torrent.id, savedCategory, savedTags]);
 
   const hasChanges = category !== savedCategory || tags !== savedTags;
+  const tagValues = parseTags(tags);
+  const suggestedTags = knownTags
+    .filter((tag) => !tagValues.includes(tag))
+    .slice(0, 8);
+  const categoryListId = `category-options-${torrent.id}`;
+
+  const setTagValues = (values: string[]) => {
+    setTags(values.join(", "));
+  };
 
   return (
     <section className="labels-editor" aria-label={t("labels.title")}>
       <label>
         <span>{t("labels.category")}</span>
         <input
+          list={categoryListId}
           value={category}
           onChange={(event) => setCategory(event.target.value)}
           placeholder={t("labels.noCategory")}
         />
+        <datalist id={categoryListId}>
+          {knownCategories.map((item) => (
+            <option value={item} key={item} />
+          ))}
+        </datalist>
       </label>
       <label>
         <span>{t("labels.tags")}</span>
@@ -5253,6 +6368,34 @@ function TorrentLabelsEditor({
           placeholder={t("labels.noTags")}
         />
       </label>
+      {tagValues.length > 0 ? (
+        <div className="tag-chip-row" aria-label={t("labels.tags")}>
+          {tagValues.map((tag) => (
+            <button
+              type="button"
+              className="tag-chip selected"
+              key={tag}
+              onClick={() => setTagValues(tagValues.filter((item) => item !== tag))}
+            >
+              {tag}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {suggestedTags.length > 0 ? (
+        <div className="tag-chip-row" aria-label={t("labels.suggestions")}>
+          {suggestedTags.map((tag) => (
+            <button
+              type="button"
+              className="tag-chip"
+              key={tag}
+              onClick={() => setTagValues([...tagValues, tag])}
+            >
+              {tag}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <button
         type="button"
         className="secondary"
@@ -5350,13 +6493,18 @@ function applyCoreEvent(
     };
   }
 
+  if (event.type === "torrent.queue.updated") {
+    return event.payload.snapshot;
+  }
+
   if (
     event.type === "torrent.added" ||
     event.type === "torrent.metadata.received" ||
     event.type === "torrent.progress.updated" ||
     event.type === "torrent.completed" ||
     event.type === "torrent.labels.updated" ||
-    event.type === "torrent.files.updated"
+    event.type === "torrent.files.updated" ||
+    event.type === "torrent.details.updated"
   ) {
     return {
       ...snapshot,
@@ -5368,6 +6516,16 @@ function applyCoreEvent(
     return {
       ...snapshot,
       torrents: snapshot.torrents.filter((torrent) => torrent.id !== event.payload.id)
+    };
+  }
+
+  if (
+    event.type === "torrent.data.moved" ||
+    event.type === "torrent.announce.requested"
+  ) {
+    return {
+      ...snapshot,
+      torrents: upsertTorrent(snapshot.torrents, event.payload.torrent)
     };
   }
 
@@ -5840,6 +6998,7 @@ function createSeedingRuleDraft(): SeedingRuleSettings {
     ratioLimit: 2,
     minutesAfterComplete: null,
     action: "pause",
+    uploadSlotLimit: 1,
     requireConfirmationBeforeDataRemoval: true
   };
 }
@@ -5883,6 +7042,40 @@ function parseTags(value: string) {
     .split(/[,;\n]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function createPreparedAddDialogState(
+  torrent: TorrentSummary,
+  sourceLabel: string
+): PreparedAddDialogState {
+  return {
+    torrentId: torrent.id,
+    sourceLabel,
+    forceStart: false,
+    filePriorities: createPreparedPriorityDraft(torrent)
+  };
+}
+
+function createPreparedPriorityDraft(torrent: TorrentSummary) {
+  return Object.fromEntries(
+    torrent.files.map((file) => [
+      String(file.index),
+      file.priority === "skip" ? "skip" : "normal"
+    ])
+  ) as Record<string, TorrentFilePriority>;
+}
+
+function createBulkPreparedPriorities(
+  torrent: TorrentSummary | undefined,
+  priority: TorrentFilePriority
+) {
+  if (!torrent) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    torrent.files.map((file) => [String(file.index), priority])
+  ) as Record<string, TorrentFilePriority>;
 }
 
 function parseMagnetUris(value: string) {
@@ -5970,6 +7163,14 @@ function compareTorrents(
   return Date.parse(right.addedAt) - Date.parse(left.addedAt);
 }
 
+function compareTorrentQueuePosition(left: TorrentSummary, right: TorrentSummary) {
+  return (
+    left.queuePosition - right.queuePosition ||
+    Date.parse(left.addedAt) - Date.parse(right.addedAt) ||
+    left.name.localeCompare(right.name)
+  );
+}
+
 function formatTorrentColumnValue(
   torrent: TorrentSummary,
   columnId: TorrentColumnId,
@@ -6019,6 +7220,21 @@ function formatTorrentColumnValue(
   return formatDateTime(torrent.addedAt, locale);
 }
 
+function formatPeerFlag(flag: string, t: (key: string) => string) {
+  const knownFlags = new Set([
+    "seed",
+    "peer-choking",
+    "peer-interested",
+    "am-choking",
+    "am-interested",
+    "webSeed",
+    "tcp",
+    "utp"
+  ]);
+
+  return knownFlags.has(flag) ? t(`peers.flag.${flag}`) : flag;
+}
+
 function mergeTags(left: string[], right: string[]) {
   return Array.from(new Set([...left, ...right].filter(Boolean)));
 }
@@ -6048,6 +7264,10 @@ function applyNetworkProfileToDraft(
       speedLimits: {
         downloadBytesPerSecond: null,
         uploadBytesPerSecond: null
+      },
+      connectionLimits: {
+        maxConnections: 55,
+        uploadSlots: 10
       },
       proxy: {
         ...base.proxy,
@@ -6104,6 +7324,10 @@ function applyNetworkProfileToDraft(
       speedLimits: {
         downloadBytesPerSecond: 512 * 1024,
         uploadBytesPerSecond: 128 * 1024
+      },
+      connectionLimits: {
+        maxConnections: 24,
+        uploadSlots: 4
       }
     };
   }

@@ -9,9 +9,11 @@ import {
   type AddTorrentUrlRequest,
   type AutomationSettings,
   type AutomationSettingsState,
+  type CommitPreparedTorrentAddRequest,
   type NetworkSettings,
   type NetworkSettingsState,
   type RemoveTorrentRequest,
+  type RenameTorrentRequest,
   type RemoteAccessCapabilities,
   type RemoteAccessHost,
   type RemoteAccessPublicSettings,
@@ -19,6 +21,7 @@ import {
   type RemoteAccessSettings,
   type RemoteAccessSettingsState,
   type SetTorrentFilePriorityRequest,
+  type SetTorrentFilePrioritiesRequest,
   type SpeedLimitSettings,
   type SpeedDoctorHistorySummary,
   type SpeedDoctorReportExport,
@@ -31,6 +34,7 @@ import {
   type TorrentSummary,
   type UpdateTorrentLabelsRequest,
   type UpdateTorrentProfileRequest,
+  type UpdateTorrentQueuePositionRequest,
   type WatchFolderScanResult
 } from "./contracts.js";
 
@@ -78,11 +82,19 @@ export interface RemoteAccessCore {
   getMagnetUri(id: string): string;
   pause(id: string): TorrentSummary;
   resume(id: string): TorrentSummary;
+  forceStart(id: string): TorrentSummary;
   remove(request: string | RemoveTorrentRequest): Promise<TorrentCoreSnapshot>;
   recheck(id: string): Promise<TorrentSummary>;
+  rename(request: RenameTorrentRequest): TorrentSummary;
+  reannounce(id: string): unknown;
   updateLabels(request: UpdateTorrentLabelsRequest): TorrentSummary;
   updateProfile(request: UpdateTorrentProfileRequest): TorrentSummary;
   setFilePriority(request: SetTorrentFilePriorityRequest): TorrentSummary;
+  setFilePriorities(request: SetTorrentFilePrioritiesRequest): TorrentSummary;
+  commitPreparedAdd(request: CommitPreparedTorrentAddRequest): TorrentSummary;
+  updateQueuePosition(
+    request: UpdateTorrentQueuePositionRequest
+  ): TorrentCoreSnapshot;
   runSpeedDoctor(id: string): Promise<TorrentSpeedDoctorReport>;
   getSpeedDoctorHistory(): SpeedDoctorHistorySummary;
   exportSpeedDoctorReport(id: string): Promise<SpeedDoctorReportExport>;
@@ -390,7 +402,7 @@ export class RemoteAccessServer {
       }
 
       const torrentActionMatch = route.match(
-        /^torrents\/([^/]+)\/(pause|resume|recheck|speed-doctor)$/
+        /^torrents\/([^/]+)\/(pause|resume|force-start|recheck|reannounce|speed-doctor)$/
       );
 
       if (
@@ -445,6 +457,24 @@ export class RemoteAccessServer {
           return;
         }
 
+        if (action === "force-start") {
+          sendJson(
+            response,
+            200,
+            await toResult(() => this.options.core.forceStart(id))
+          );
+          return;
+        }
+
+        if (action === "reannounce") {
+          sendJson(
+            response,
+            200,
+            await toResult(() => this.options.core.reannounce(id))
+          );
+          return;
+        }
+
         sendJson(
           response,
           200,
@@ -458,6 +488,26 @@ export class RemoteAccessServer {
       if (request.method === "DELETE" && torrentRemoveMatch) {
         const id = decodeURIComponent(torrentRemoveMatch[1]);
         sendJson(response, 200, await toResult(() => this.options.core.remove(id)));
+        return;
+      }
+
+      const torrentNameMatch = route.match(/^torrents\/([^/]+)\/name$/);
+
+      if (request.method === "PATCH" && torrentNameMatch) {
+        const body = await readJsonBody<Omit<RenameTorrentRequest, "id">>(
+          request
+        );
+        const id = decodeURIComponent(torrentNameMatch[1]);
+        sendJson(
+          response,
+          200,
+          await toResult(() =>
+            this.options.core.rename({
+              id,
+              ...body
+            })
+          )
+        );
         return;
       }
 
@@ -501,6 +551,26 @@ export class RemoteAccessServer {
         return;
       }
 
+      const torrentFilesMatch = route.match(/^torrents\/([^/]+)\/files$/);
+
+      if (request.method === "PATCH" && torrentFilesMatch) {
+        const body = await readJsonBody<
+          Omit<SetTorrentFilePrioritiesRequest, "id">
+        >(request);
+        const id = decodeURIComponent(torrentFilesMatch[1]);
+        sendJson(
+          response,
+          200,
+          await toResult(() =>
+            this.options.core.setFilePriorities({
+              id,
+              ...body
+            })
+          )
+        );
+        return;
+      }
+
       const torrentFileMatch = route.match(/^torrents\/([^/]+)\/files\/(\d+)$/);
 
       if (request.method === "PATCH" && torrentFileMatch) {
@@ -516,6 +586,48 @@ export class RemoteAccessServer {
             this.options.core.setFilePriority({
               id,
               fileIndex,
+              ...body
+            })
+          )
+        );
+        return;
+      }
+
+      const torrentPreparedAddMatch = route.match(
+        /^torrents\/([^/]+)\/prepared-add\/commit$/
+      );
+
+      if (request.method === "POST" && torrentPreparedAddMatch) {
+        const body = await readJsonBody<
+          Omit<CommitPreparedTorrentAddRequest, "id">
+        >(request);
+        const id = decodeURIComponent(torrentPreparedAddMatch[1]);
+        sendJson(
+          response,
+          200,
+          await toResult(() =>
+            this.options.core.commitPreparedAdd({
+              id,
+              ...body
+            })
+          )
+        );
+        return;
+      }
+
+      const torrentQueueMatch = route.match(/^torrents\/([^/]+)\/queue$/);
+
+      if (request.method === "POST" && torrentQueueMatch) {
+        const body = await readJsonBody<
+          Omit<UpdateTorrentQueuePositionRequest, "id">
+        >(request);
+        const id = decodeURIComponent(torrentQueueMatch[1]);
+        sendJson(
+          response,
+          200,
+          await toResult(() =>
+            this.options.core.updateQueuePosition({
+              id,
               ...body
             })
           )
@@ -952,12 +1064,17 @@ function createApiDocs(origin: string | null) {
       "GET /api/torrents/{id}/magnet",
       "POST /api/torrents/{id}/pause",
       "POST /api/torrents/{id}/resume",
+      "POST /api/torrents/{id}/force-start",
       "POST /api/torrents/{id}/recheck",
+      "POST /api/torrents/{id}/reannounce",
       "GET /api/torrents/{id}/speed-doctor",
       "DELETE /api/torrents/{id}",
+      "PATCH /api/torrents/{id}/name",
       "PATCH /api/torrents/{id}/labels",
       "PATCH /api/torrents/{id}/profile",
+      "PATCH /api/torrents/{id}/files",
       "PATCH /api/torrents/{id}/files/{fileIndex}",
+      "POST /api/torrents/{id}/prepared-add/commit",
       "GET /api/network-settings",
       "PUT /api/network-settings",
       "PATCH /api/network-settings/speed-limits",

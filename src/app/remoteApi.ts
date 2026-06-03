@@ -4,12 +4,18 @@ import type {
   AddTorrentUrlRequest,
   AutomationSettings,
   AutomationSettingsState,
+  CommitPreparedTorrentAddRequest,
+  ExportTorrentFileRequest,
+  MoveTorrentDataRequest,
   NetworkDiagnosticsReport,
   NetworkSettings,
   NetworkSettingsState,
   OpenTorrentFileRequest,
+  ReannounceTorrentResult,
   RemoveTorrentRequest,
+  RenameTorrentRequest,
   SetTorrentFilePriorityRequest,
+  SetTorrentFilePrioritiesRequest,
   SpeedDoctorHistorySummary,
   SpeedDoctorPortCheckResult,
   SpeedDoctorReportExport,
@@ -23,6 +29,7 @@ import type {
   TorrentSummary,
   UpdateTorrentLabelsRequest,
   UpdateTorrentProfileRequest,
+  UpdateTorrentQueuePositionRequest,
   WatchFolderScanResult
 } from "../../electron/torrentCore/contracts";
 
@@ -74,6 +81,12 @@ export function createRemoteTorrentApi(getPassword: () => string): TorrentApi {
         getPassword,
         { method: "POST" }
       ),
+    forceStart: (id: string) =>
+      apiRequest<TorrentSummary>(
+        `/api/torrents/${encodeURIComponent(id)}/force-start`,
+        getPassword,
+        { method: "POST" }
+      ),
     remove: (request: string | RemoveTorrentRequest) => {
       const normalized =
         typeof request === "string" ? { id: request, deleteData: false } : request;
@@ -100,6 +113,39 @@ export function createRemoteTorrentApi(getPassword: () => string): TorrentApi {
         getPassword,
         { method: "POST" }
       ),
+    rename: (request: RenameTorrentRequest) => {
+      const { id, ...body } = request;
+      return apiRequest<TorrentSummary>(
+        `/api/torrents/${encodeURIComponent(id)}/name`,
+        getPassword,
+        {
+          method: "PATCH",
+          body: JSON.stringify(body)
+        }
+      );
+    },
+    moveData: (_request: MoveTorrentDataRequest) =>
+      Promise.resolve({
+        ok: false,
+        error: {
+          code: "unsupported_remote_move_data",
+          message: "Moving downloaded data is available only in the desktop app."
+        }
+      }),
+    reannounce: (id: string) =>
+      apiRequest<ReannounceTorrentResult>(
+        `/api/torrents/${encodeURIComponent(id)}/reannounce`,
+        getPassword,
+        { method: "POST" }
+      ),
+    exportTorrentFile: (_request: ExportTorrentFileRequest) =>
+      Promise.resolve({
+        ok: false,
+        error: {
+          code: "unsupported_remote_torrent_export",
+          message: "Exporting .torrent files is available only in the desktop app."
+        }
+      }),
     copyMagnet: async (id: string) => {
       const result = await apiRequest<string>(
         `/api/torrents/${encodeURIComponent(id)}/magnet`,
@@ -178,6 +224,39 @@ export function createRemoteTorrentApi(getPassword: () => string): TorrentApi {
         getPassword,
         {
           method: "PATCH",
+          body: JSON.stringify(body)
+        }
+      );
+    },
+    setFilePriorities: (request: SetTorrentFilePrioritiesRequest) => {
+      const { id, ...body } = request;
+      return apiRequest<TorrentSummary>(
+        `/api/torrents/${encodeURIComponent(id)}/files`,
+        getPassword,
+        {
+          method: "PATCH",
+          body: JSON.stringify(body)
+        }
+      );
+    },
+    commitPreparedAdd: (request: CommitPreparedTorrentAddRequest) => {
+      const { id, ...body } = request;
+      return apiRequest<TorrentSummary>(
+        `/api/torrents/${encodeURIComponent(id)}/prepared-add/commit`,
+        getPassword,
+        {
+          method: "POST",
+          body: JSON.stringify(body)
+        }
+      );
+    },
+    updateQueuePosition: (request: UpdateTorrentQueuePositionRequest) => {
+      const { id, ...body } = request;
+      return apiRequest<TorrentCoreSnapshot>(
+        `/api/torrents/${encodeURIComponent(id)}/queue`,
+        getPassword,
+        {
+          method: "POST",
           body: JSON.stringify(body)
         }
       );

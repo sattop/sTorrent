@@ -481,6 +481,20 @@ describe("torrent-core contracts", () => {
     });
   });
 
+  it("starts prepared add flows with all files deselected", () => {
+    const { webTorrentOptions } = buildWebTorrentAddOptions({
+      downloadPath: "D:/Downloads",
+      profileId: "manual",
+      deselect: true
+    });
+
+    expect(webTorrentOptions).toMatchObject({
+      path: "D:/Downloads",
+      paused: false,
+      deselect: true
+    });
+  });
+
   it("normalizes categories, tags, and file priorities at the core boundary", () => {
     expect(normalizeTorrentCategory("  Linux   ISO  ")).toBe("Linux ISO");
     expect(normalizeTorrentCategory("   ")).toBeNull();
@@ -597,6 +611,10 @@ describe("torrent-core contracts", () => {
         downloadBytesPerSecond: 512.4,
         uploadBytesPerSecond: -1
       },
+      connectionLimits: {
+        maxConnections: 123,
+        uploadSlots: 7
+      },
       proxy: {
         type: "socks5",
         host: " 127.0.0.1 ",
@@ -611,6 +629,10 @@ describe("torrent-core contracts", () => {
     expect(settings.incomingPort).toBeNull();
     expect(settings.speedLimits.downloadBytesPerSecond).toBe(512);
     expect(settings.speedLimits.uploadBytesPerSecond).toBeNull();
+    expect(settings.connectionLimits).toEqual({
+      maxConnections: 123,
+      uploadSlots: 7
+    });
     expect(settings.proxy).toMatchObject({
       type: "socks5",
       host: "127.0.0.1",
@@ -620,6 +642,7 @@ describe("torrent-core contracts", () => {
     });
 
     expect(buildWebTorrentClientOptions(settings)).toMatchObject({
+      maxConns: 123,
       downloadLimit: 512,
       uploadLimit: -1
     });
@@ -936,10 +959,26 @@ describe("torrent-core contracts", () => {
           enabled: true,
           ratioLimit: 2.5,
           minutesAfterComplete: 60,
-          action: "pause",
+          action: "remove",
+          uploadSlotLimit: 2,
+          requireConfirmationBeforeDataRemoval: true
+        },
+        {
+          id: "limit",
+          name: "Limit after time",
+          enabled: true,
+          ratioLimit: null,
+          minutesAfterComplete: 30,
+          action: "limit",
+          uploadSlotLimit: 1,
           requireConfirmationBeforeDataRemoval: true
         }
       ],
+      queue: {
+        enabled: true,
+        maxActiveDownloads: 3,
+        maxActiveSeeds: 5
+      },
       hooksEnabled: true
     } as unknown as Partial<AutomationSettings>);
 
@@ -952,10 +991,30 @@ describe("torrent-core contracts", () => {
       tags: ["linux", "iso"]
     });
     expect(settings.seedingRules[0]).toMatchObject({
-      action: "pause",
+      action: "remove",
+      uploadSlotLimit: 2,
       requireConfirmationBeforeDataRemoval: true
     });
+    expect(settings.seedingRules[1]).toMatchObject({
+      action: "limit",
+      uploadSlotLimit: 1
+    });
+    expect(settings.queue).toEqual({
+      enabled: true,
+      maxActiveDownloads: 3,
+      maxActiveSeeds: 5
+    });
     expect(settings.hooksEnabled).toBe(false);
+  });
+
+  it("defaults the active queue to three downloads and five seeds", () => {
+    const settings = normalizeAutomationSettings(undefined);
+
+    expect(settings.queue).toEqual({
+      enabled: true,
+      maxActiveDownloads: 3,
+      maxActiveSeeds: 5
+    });
   });
 
   it("deduplicates RSS autoload candidates before accepting downloads", () => {
@@ -1098,26 +1157,7 @@ describe("torrent-core contracts", () => {
           capabilities: NETWORK_CAPABILITIES,
           availableInterfaces: []
         },
-        automation: {
-          settings: {
-            watchFolders: [],
-            favoriteFolders: [],
-            seedingRules: [],
-            rssRules: [],
-            speedSchedules: [],
-            hooksEnabled: false
-          },
-          capabilities: {
-            watchFolders: true,
-            favoriteFolders: true,
-            seedingRules: true,
-            rssDuplicatePrevention: true,
-            speedLimitSchedules: true,
-            hooks: false,
-            safeDataRemovalOnly: true
-          },
-          activeSpeedScheduleId: null
-        },
+        automation: createTestAutomationState(),
         disk: null
       });
     const core: RemoteAccessCore = {
@@ -1132,12 +1172,29 @@ describe("torrent-core contracts", () => {
         calls.push(`resume:${id}`);
         return { ...torrent, id, status: "downloading" };
       },
+      forceStart: (id) => {
+        calls.push(`forceStart:${id}`);
+        return { ...torrent, id, forceStarted: true };
+      },
       remove: async () => ({
         torrents: [],
         downloadSpeedBytes: 0,
         uploadSpeedBytes: 0
       }),
       recheck: async () => ({ ...torrent, status: "checking" }),
+      rename: (request) => {
+        calls.push(`rename:${request.id}:${request.name}`);
+        return { ...torrent, id: request.id, name: request.name };
+      },
+      reannounce: (id) => {
+        calls.push(`reannounce:${id}`);
+        return {
+          torrent: { ...torrent, id },
+          announcedAt: "2026-01-01T00:00:00.000Z",
+          trackerCount: 1,
+          method: "tracker.update" as const
+        };
+      },
       updateLabels: () => torrent,
       updateProfile: (request) => {
         calls.push(`profile:${request.id}:${request.profileId}`);
@@ -1148,6 +1205,16 @@ describe("torrent-core contracts", () => {
         };
       },
       setFilePriority: () => torrent,
+      setFilePriorities: () => torrent,
+      commitPreparedAdd: () => torrent,
+      updateQueuePosition: (request) => {
+        calls.push(`queue:${request.id}:${request.direction}`);
+        return {
+          torrents: [torrent],
+          downloadSpeedBytes: 0,
+          uploadSpeedBytes: 0
+        };
+      },
       runSpeedDoctor: async (id) => createReport(id),
       getSpeedDoctorHistory: () => createReport(torrent.id).technicalDetails.speedHistory,
       exportSpeedDoctorReport: async (id) => ({
@@ -1188,32 +1255,14 @@ describe("torrent-core contracts", () => {
         capabilities: NETWORK_CAPABILITIES,
         availableInterfaces: []
       }),
-      getAutomationSettingsState: () => ({
-        settings: {
-          watchFolders: [],
-          favoriteFolders: [],
-          seedingRules: [],
-          rssRules: [],
-          speedSchedules: [],
-          hooksEnabled: false
-        },
-        capabilities: {
-          watchFolders: true,
-          favoriteFolders: true,
-          seedingRules: true,
-          rssDuplicatePrevention: true,
-          speedLimitSchedules: true,
-          hooks: false,
-          safeDataRemovalOnly: true
-        },
-        activeSpeedScheduleId: null
-      }),
+      getAutomationSettingsState: () => createTestAutomationState(),
       updateAutomationSettings: async (settings) => ({
         settings,
         capabilities: {
           watchFolders: true,
           favoriteFolders: true,
           seedingRules: true,
+          queue: true,
           rssDuplicatePrevention: true,
           speedLimitSchedules: true,
           hooks: false,
@@ -1308,6 +1357,25 @@ describe("torrent-core contracts", () => {
         value: { id: torrent.id, selectedProfileId: "max_speed" }
       });
       expect(calls).toContain(`profile:${torrent.id}:max_speed`);
+
+      const queue = await fetch(
+        `${state.runtime.origin}/api/torrents/${torrent.id}/queue`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer correct horse",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ direction: "top" })
+        }
+      );
+      const queueResult = await queue.json();
+
+      expect(queueResult).toMatchObject({
+        ok: true,
+        value: { torrents: [expect.objectContaining({ id: torrent.id })] }
+      });
+      expect(calls).toContain(`queue:${torrent.id}:top`);
     } finally {
       await server.shutdown();
     }
@@ -1422,12 +1490,18 @@ function createTestAutomationState(activeSpeedScheduleId: string | null = null) 
       seedingRules: [],
       rssRules: [],
       speedSchedules: [],
+      queue: {
+        enabled: true,
+        maxActiveDownloads: 3,
+        maxActiveSeeds: 5
+      },
       hooksEnabled: false as const
     },
     capabilities: {
       watchFolders: true,
       favoriteFolders: true,
       seedingRules: true,
+      queue: true,
       rssDuplicatePrevention: true,
       speedLimitSchedules: true,
       hooks: false as const,
@@ -1442,10 +1516,12 @@ function createTestTorrentSummary() {
     id: "abc123",
     infoHash: "abc123",
     name: "Test torrent",
+    originalName: "Test torrent",
     status: "downloading" as const,
     progress: 0.5,
     sizeBytes: 1024,
     downloadedBytes: 512,
+    uploadedBytes: 0,
     downloadSpeedBytes: 0,
     uploadSpeedBytes: 0,
     seeds: 0,
@@ -1463,8 +1539,21 @@ function createTestTorrentSummary() {
     sourceType: "magnet" as const,
     selectedProfileId: "manual" as const,
     recheckAvailable: true,
+    forceStarted: false,
+    selectionPending: false,
+    canMoveData: true,
+    canReannounce: false,
+    canExportTorrent: false,
     category: null,
     tags: [],
+    trackers: [],
+    httpSources: [],
+    peerDetails: [],
+    queueRole: "download" as const,
+    queueState: "active" as const,
+    queuePosition: 1,
+    queuedReason: null,
+    completedAt: null,
     files: []
   };
 }

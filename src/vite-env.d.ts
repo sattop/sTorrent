@@ -27,14 +27,22 @@ import type {
   AssistantWarningDismissRequest,
   AutomationSettings,
   AutomationSettingsState,
+  CommitPreparedTorrentAddRequest,
+  ExportTorrentFileRequest,
+  ExportTorrentFileResult,
+  MoveTorrentDataRequest,
+  MoveTorrentDataResult,
   NetworkDiagnosticsReport,
   NetworkSettings,
   NetworkSettingsState,
   OpenTorrentFileRequest,
+  ReannounceTorrentResult,
   RemoteAccessSettings,
   RemoteAccessSettingsState,
   RemoveTorrentRequest,
+  RenameTorrentRequest,
   SetTorrentFilePriorityRequest,
+  SetTorrentFilePrioritiesRequest,
   SpeedDoctorHistorySummary,
   SpeedDoctorPortCheckResult,
   SpeedDoctorReportExport,
@@ -49,6 +57,7 @@ import type {
   TorrentSummary,
   UpdateTorrentLabelsRequest,
   UpdateTorrentProfileRequest,
+  UpdateTorrentQueuePositionRequest,
   WatchFolderScanResult
 } from "../electron/torrentCore/contracts";
 
@@ -69,10 +78,23 @@ declare global {
         ): Promise<TorrentCoreResult<TorrentSummary>>;
         pause(id: string): Promise<TorrentCoreResult<TorrentSummary>>;
         resume(id: string): Promise<TorrentCoreResult<TorrentSummary>>;
+        forceStart(id: string): Promise<TorrentCoreResult<TorrentSummary>>;
         remove(
           request: string | RemoveTorrentRequest
         ): Promise<TorrentCoreResult<TorrentCoreSnapshot>>;
         recheck(id: string): Promise<TorrentCoreResult<TorrentSummary>>;
+        rename(
+          request: RenameTorrentRequest
+        ): Promise<TorrentCoreResult<TorrentSummary>>;
+        moveData(
+          request: MoveTorrentDataRequest
+        ): Promise<TorrentCoreResult<MoveTorrentDataResult>>;
+        reannounce(
+          id: string
+        ): Promise<TorrentCoreResult<ReannounceTorrentResult>>;
+        exportTorrentFile(
+          request: ExportTorrentFileRequest
+        ): Promise<TorrentCoreResult<ExportTorrentFileResult>>;
         copyMagnet(id: string): Promise<TorrentCoreResult<string>>;
         openTorrentFolder(id: string): Promise<TorrentCoreResult<true>>;
         openTorrentFile(
@@ -87,6 +109,15 @@ declare global {
         setFilePriority(
           request: SetTorrentFilePriorityRequest
         ): Promise<TorrentCoreResult<TorrentSummary>>;
+        setFilePriorities(
+          request: SetTorrentFilePrioritiesRequest
+        ): Promise<TorrentCoreResult<TorrentSummary>>;
+        commitPreparedAdd(
+          request: CommitPreparedTorrentAddRequest
+        ): Promise<TorrentCoreResult<TorrentSummary>>;
+        updateQueuePosition(
+          request: UpdateTorrentQueuePositionRequest
+        ): Promise<TorrentCoreResult<TorrentCoreSnapshot>>;
         getSnapshot(): Promise<TorrentCoreResult<TorrentCoreSnapshot>>;
         getStatistics(): Promise<TorrentCoreResult<TorrentStatistics>>;
         getEventLogs(): Promise<TorrentCoreResult<TorrentEventLogEntry[]>>;

@@ -2,6 +2,20 @@
 
 All notable changes to sTorent are documented in this file.
 
+## [0.2.0] - 2026-06-03
+
+### Added
+
+- Active torrent queue with separate download and seed roles, default active limits of 3 downloads and 5 seeds, persisted queue order, and force-start bypass.
+- Queue controls in the desktop UI and remote WebUI, plus a remote API endpoint for moving torrents in the queue.
+- Seeding rule actions for pausing, safe remove-from-list without deleting downloaded data, and limiting upload slots after ratio or time thresholds.
+- Configurable WebTorrent engine connection limits and upload slots.
+
+### Changed
+
+- Resume now returns torrents to the scheduler instead of always bypassing queue limits.
+- Automation settings now include queue limits and safer seeding rule normalization.
+
 ## [0.1.4] - 2026-06-01
 
 ### Added

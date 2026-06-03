@@ -18,15 +18,24 @@ import {
   type AssistantWarningDismissRequest,
   type AutomationSettings,
   type AutomationSettingsState,
+  type CommitPreparedTorrentAddRequest,
   type DownloadProfileId,
+  type ExportTorrentFileRequest,
+  type ExportTorrentFileResult,
+  type MoveTorrentDataRequest,
+  type MoveTorrentDataResult,
   type NetworkDiagnosticsReport,
   type NetworkInterfaceInfo,
   type NetworkSettings,
   type NetworkSettingsState,
   normalizeRemoveTorrentRequest,
   type OpenTorrentFileRequest,
+  type ReannounceTorrentResult,
   type RemoveTorrentRequest,
+  type RenameTorrentRequest,
+  type SeedingRuleSettings,
   type SetTorrentFilePriorityRequest,
+  type SetTorrentFilePrioritiesRequest,
   type SpeedDoctorScanMode,
   type SpeedDoctorPortCheckResult,
   type WatchFolderScanResult,
@@ -38,6 +47,8 @@ import {
   type TorrentEventLogExport,
   type TorrentCoreEventPayloadMap,
   type TorrentCoreSnapshot,
+  type TorrentQueueRole,
+  type TorrentQueueState,
   type TorrentStatistics,
   type TorrentStatisticsCounters,
   type TorrentSourceType,
@@ -46,7 +57,8 @@ import {
   type SpeedDoctorProbeStatus,
   type SpeedDoctorRuntimeInput,
   type UpdateTorrentLabelsRequest,
-  type UpdateTorrentProfileRequest
+  type UpdateTorrentProfileRequest,
+  type UpdateTorrentQueuePositionRequest
 } from "./contracts.js";
 import {
   createTorrentEventLogEntry,
@@ -115,12 +127,18 @@ interface PersistedTorrentRecord {
   category?: string | null;
   tags?: string[];
   filePriorities?: Record<string, TorrentFilePriority>;
+  nameOverride?: string | null;
+  forceStarted?: boolean;
+  selectionPending?: boolean;
+  queuePosition?: number;
+  completedAt?: string | null;
+  seedUploadSlotLimit?: number | null;
   addedAt?: string;
   metadataReceivedAt?: string | null;
 }
 
 interface PersistedTorrentState {
-  version: 1 | 2 | 3 | 4;
+  version: 1 | 2 | 3 | 4 | 5 | 6;
   torrents: PersistedTorrentRecord[];
 }
 
@@ -131,6 +149,13 @@ interface TorrentRecord {
   downloadPath: string;
   profileId: DownloadProfileId;
   manualPaused: boolean;
+  queuePaused: boolean;
+  forceStarted: boolean;
+  selectionPending: boolean;
+  nameOverride: string | null;
+  queuePosition: number;
+  completedAt: string | null;
+  seedUploadSlotLimit: number | null;
   category: string | null;
   tags: string[];
   filePriorities: Record<string, TorrentFilePriority>;
@@ -145,6 +170,17 @@ interface TorrentRecord {
   noPeersSources: string[];
   statusOverride?: TorrentStatus;
 }
+
+type InternalAddTorrentRequest = (
+  AddTorrentFileRequest | AddMagnetRequest | AddTorrentUrlRequest
+) & {
+  nameOverride?: string | null;
+  forceStarted?: boolean;
+  selectionPending?: boolean;
+  queuePosition?: number;
+  completedAt?: string | null;
+  seedUploadSlotLimit?: number | null;
+};
 
 export interface WebTorrentCoreOptions {
   defaultDownloadPath: string;
@@ -183,6 +219,8 @@ export class WebTorrentCore extends EventEmitter {
   private speedHistoryDirty = false;
   private statisticsDirty = false;
   private eventLogDirty = false;
+  private queuePositionCounter = 0;
+  private seedingRulesApplying = false;
 
   constructor(private readonly options: WebTorrentCoreOptions) {
     super();
@@ -201,6 +239,7 @@ export class WebTorrentCore extends EventEmitter {
         this.updateRuntimeStats(record);
         this.emitCore("torrent.progress.updated", this.toSummary(record));
       }
+      this.applyQueueScheduling(false);
       this.recordStatisticsSample();
       this.recordSpeedHistorySample(false);
     }, 1_000);
@@ -208,6 +247,7 @@ export class WebTorrentCore extends EventEmitter {
 
     this.automationTimer = setInterval(() => {
       this.applyAutomationRuntimeSettings(true);
+      void this.applySeedingRules();
     }, 60_000);
     this.automationTimer.unref();
   }
@@ -337,7 +377,7 @@ export class WebTorrentCore extends EventEmitter {
     }
 
     if (
-      ![1, 2, 3, 4].includes(persistedState.version) ||
+      ![1, 2, 3, 4, 5, 6].includes(persistedState.version) ||
       !Array.isArray(persistedState.torrents)
     ) {
       return;
@@ -350,7 +390,13 @@ export class WebTorrentCore extends EventEmitter {
         startPaused: record.paused,
         category: record.category,
         tags: record.tags,
-        filePriorities: record.filePriorities
+        filePriorities: record.filePriorities,
+        nameOverride: record.nameOverride,
+        forceStarted: record.forceStarted,
+        selectionPending: record.selectionPending,
+        queuePosition: record.queuePosition,
+        completedAt: record.completedAt,
+        seedUploadSlotLimit: record.seedUploadSlotLimit
       };
 
       try {
@@ -374,6 +420,8 @@ export class WebTorrentCore extends EventEmitter {
         });
       }
     }
+
+    this.applyQueueScheduling(true);
   }
 
   async updateNetworkSettings(settings: NetworkSettings) {
@@ -394,6 +442,8 @@ export class WebTorrentCore extends EventEmitter {
     );
     this.configureWatchFolders();
     this.applyAutomationRuntimeSettings(true);
+    this.applyQueueScheduling(true);
+    void this.applySeedingRules();
     await this.persistAutomationSettings();
 
     const automation = this.getAutomationSettingsState();
@@ -619,19 +669,40 @@ export class WebTorrentCore extends EventEmitter {
   pause(id: string) {
     const record = this.getRecord(id);
     record.manualPaused = true;
+    record.queuePaused = false;
+    record.forceStarted = false;
     record.torrent.pause();
     record.statusOverride = "paused";
     this.emitStatus(record);
+    this.applyQueueScheduling(true);
     void this.persistState();
     return this.toSummary(record);
   }
 
   resume(id: string) {
     const record = this.getRecord(id);
+    this.commitSelectionIfNeeded(record);
     record.manualPaused = false;
+    record.queuePaused = false;
+    record.forceStarted = false;
+    record.statusOverride = undefined;
+    this.applyQueueScheduling(true);
+    this.emitStatus(record);
+    void this.persistState();
+    return this.toSummary(record);
+  }
+
+  forceStart(id: string) {
+    const record = this.getRecord(id);
+    this.commitSelectionIfNeeded(record);
+    record.manualPaused = false;
+    record.queuePaused = false;
+    record.forceStarted = true;
     record.statusOverride = undefined;
     record.torrent.resume();
-    this.emitStatus(record);
+    this.applyUploadSlotLimit(record);
+    this.applyQueueScheduling(true);
+    this.emitCore("torrent.details.updated", this.toSummary(record));
     void this.persistState();
     return this.toSummary(record);
   }
@@ -641,20 +712,7 @@ export class WebTorrentCore extends EventEmitter {
     const record = this.getRecord(normalized.id);
     const summary = this.toSummary(record);
 
-    await new Promise<void>((resolve, reject) => {
-      void this.client.remove(
-        record.torrent,
-        { destroyStore: normalized.deleteData },
-        (error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-
-          resolve();
-        }
-      );
-    });
+    await this.removeTorrentFromClient(record, normalized.deleteData);
 
     this.records.delete(record.id);
     this.recordTorrentRemoved(normalized.deleteData);
@@ -663,6 +721,7 @@ export class WebTorrentCore extends EventEmitter {
       name: summary.name,
       deleteData: normalized.deleteData
     });
+    this.applyQueueScheduling(true);
     void this.persistState();
     return this.getSnapshot();
   }
@@ -689,9 +748,180 @@ export class WebTorrentCore extends EventEmitter {
     });
 
     record.statusOverride = undefined;
+    this.applyQueueScheduling(true);
     this.emitStatus(record);
     this.emitCore("torrent.progress.updated", this.toSummary(record));
     return this.toSummary(record);
+  }
+
+  rename(request: RenameTorrentRequest) {
+    const record = this.getRecord(request.id);
+    const normalizedName = normalizeTorrentName(request.name);
+
+    record.nameOverride = normalizedName;
+    const summary = this.toSummary(record);
+    this.emitCore("torrent.details.updated", summary);
+    void this.persistState();
+    return summary;
+  }
+
+  async moveData(request: MoveTorrentDataRequest): Promise<MoveTorrentDataResult> {
+    const record = this.getRecord(request.id);
+    const destinationPath = normalizeDestinationPath(request.destinationPath);
+    const previousSavePath = this.getTorrentStorageRootPath(record);
+    const storageFolderName = this.getTorrentStorageFolderName(record);
+    const nextStorageRootPath = storageFolderName
+      ? path.resolve(destinationPath, storageFolderName)
+      : destinationPath;
+    const wasPaused = record.manualPaused;
+    const wasForceStarted = record.forceStarted;
+    const replacementRequest: InternalAddTorrentRequest = {
+      downloadPath: destinationPath,
+      profileId: record.profileId,
+      startPaused: wasPaused,
+      category: record.category,
+      tags: record.tags,
+      filePriorities: record.filePriorities,
+      nameOverride: record.nameOverride,
+      forceStarted: wasForceStarted && !wasPaused,
+      selectionPending: record.selectionPending,
+      queuePosition: record.queuePosition,
+      completedAt: record.completedAt,
+      seedUploadSlotLimit: record.seedUploadSlotLimit
+    };
+    const source = record.source;
+    const files = record.torrent.files.map((file) => ({
+      path: file.path || file.name
+    }));
+    const id = record.id;
+
+    record.manualPaused = true;
+    record.queuePaused = false;
+    record.forceStarted = false;
+    record.torrent.pause();
+    record.statusOverride = "paused";
+    this.emitStatus(record);
+
+    await this.removeTorrentFromClient(record);
+    this.records.delete(id);
+
+    let movedFiles = 0;
+    let torrent: TorrentSummary;
+
+    try {
+      movedFiles = await moveTorrentFiles(
+        previousSavePath,
+        nextStorageRootPath,
+        files
+      );
+      torrent = await this.addTorrentFromSource(source, replacementRequest, {
+        countAsAdded: false
+      });
+    } catch (error) {
+      try {
+        await this.addTorrentFromSource(
+          source,
+          {
+            ...replacementRequest,
+            downloadPath: record.downloadPath,
+            startPaused: true,
+            forceStarted: false
+          },
+          { countAsAdded: false }
+        );
+      } catch (restoreError) {
+        this.emitCore("torrent.error", {
+          id,
+          message: `Move failed and restore also failed: ${getErrorMessage(
+            restoreError
+          )}`
+        });
+      }
+
+      throw error;
+    }
+
+    const result: MoveTorrentDataResult = {
+      torrent,
+      previousSavePath,
+      newSavePath: torrent.savePath,
+      movedFiles
+    };
+    this.emitCore("torrent.data.moved", {
+      id: torrent.id,
+      previousSavePath,
+      newSavePath: torrent.savePath,
+      movedFiles,
+      torrent
+    });
+    void this.persistState();
+    return result;
+  }
+
+  reannounce(id: string): ReannounceTorrentResult {
+    const record = this.getRecord(id);
+    const discovery = record.torrent.discovery;
+    const tracker = discovery?.tracker;
+    const trackerCount = record.torrent.announce?.length ?? 0;
+
+    if (!tracker || trackerCount === 0) {
+      throw createCodedError(
+        "reannounce_unavailable",
+        "Tracker announce is not available for this torrent."
+      );
+    }
+
+    let method: ReannounceTorrentResult["method"] = "tracker.update";
+
+    if (typeof tracker.update === "function") {
+      tracker.update({ numwant: 80 });
+    } else if (typeof tracker.start === "function") {
+      method = "tracker.start";
+      tracker.start({ numwant: 80 });
+    } else {
+      throw createCodedError(
+        "reannounce_unavailable",
+        "The selected torrent engine does not expose a tracker announce method."
+      );
+    }
+
+    const announcedAt = new Date().toISOString();
+    record.lastActivityAt = announcedAt;
+    const torrent = this.toSummary(record);
+    this.emitCore("torrent.announce.requested", {
+      id: torrent.id,
+      announcedAt,
+      trackerCount,
+      method,
+      torrent
+    });
+
+    return {
+      torrent,
+      announcedAt,
+      trackerCount,
+      method
+    };
+  }
+
+  async exportTorrentFile(
+    request: ExportTorrentFileRequest
+  ): Promise<ExportTorrentFileResult> {
+    const record = this.getRecord(request.id);
+    const targetPath = normalizeTorrentExportPath(
+      request.targetPath,
+      this.toSummary(record).name
+    );
+    const { source, torrentFile } = await this.getExportableTorrentFile(record);
+
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.writeFile(targetPath, torrentFile);
+
+    return {
+      torrent: this.toSummary(record),
+      exportPath: targetPath,
+      source
+    };
   }
 
   updateLabels(request: UpdateTorrentLabelsRequest) {
@@ -714,7 +944,7 @@ export class WebTorrentCore extends EventEmitter {
   updateProfile(request: UpdateTorrentProfileRequest) {
     const record = this.getRecord(request.id);
     record.profileId = request.profileId;
-    applyProfileHintsToRecord(record);
+    applyProfileHintsToRecord(record, !record.selectionPending);
 
     const summary = this.toSummary(record);
     this.emitCore("assistant.profile.applied", {
@@ -742,12 +972,101 @@ export class WebTorrentCore extends EventEmitter {
 
     const priority = normalizeFilePriority(request.priority);
     record.filePriorities[file.path] = priority;
-    applyFilePriority(file, priority);
+    if (!record.selectionPending) {
+      applyFilePriority(file, priority);
+    }
 
     const summary = this.toSummary(record);
     this.emitCore("torrent.files.updated", summary);
     void this.persistState();
     return summary;
+  }
+
+  setFilePriorities(request: SetTorrentFilePrioritiesRequest) {
+    const record = this.getRecord(request.id);
+
+    for (const [fileIndex, priority] of Object.entries(request.priorities)) {
+      const index = Number(fileIndex);
+      const file = record.torrent.files[index];
+
+      if (!file) {
+        continue;
+      }
+
+      record.filePriorities[file.path] = normalizeFilePriority(priority);
+      if (!record.selectionPending) {
+        applyFilePriority(file, record.filePriorities[file.path]);
+      }
+    }
+
+    const summary = this.toSummary(record);
+    this.emitCore("torrent.files.updated", summary);
+    void this.persistState();
+    return summary;
+  }
+
+  commitPreparedAdd(request: CommitPreparedTorrentAddRequest) {
+    const record = this.getRecord(request.id);
+
+    if (request.filePriorities) {
+      for (const [fileIndex, priority] of Object.entries(request.filePriorities)) {
+        const index = Number(fileIndex);
+        const file = record.torrent.files[index];
+
+        if (file) {
+          record.filePriorities[file.path] = normalizeFilePriority(priority);
+        }
+      }
+    }
+
+    record.selectionPending = false;
+    this.applyFilePriorities(record);
+
+    if (request.start === false) {
+      record.manualPaused = true;
+      record.queuePaused = false;
+      record.forceStarted = false;
+      record.statusOverride = "paused";
+      record.torrent.pause();
+    } else {
+      record.manualPaused = false;
+      record.queuePaused = false;
+      record.forceStarted = Boolean(request.forceStart);
+      record.statusOverride = undefined;
+      this.applyQueueScheduling(true);
+    }
+
+    const summary = this.toSummary(record);
+    this.emitCore("torrent.files.updated", summary);
+    this.emitStatus(record);
+    void this.persistState();
+    return summary;
+  }
+
+  updateQueuePosition(request: UpdateTorrentQueuePositionRequest) {
+    const record = this.getRecord(request.id);
+    const role = getQueueRole(record);
+    const records = this.getQueueRecords(role);
+    const currentIndex = records.findIndex((item) => item.id === record.id);
+
+    if (currentIndex === -1) {
+      return this.getSnapshot();
+    }
+
+    const [item] = records.splice(currentIndex, 1);
+    const nextIndex = getMovedQueueIndex(
+      currentIndex,
+      records.length,
+      request.direction
+    );
+    records.splice(nextIndex, 0, item);
+    records.forEach((queuedRecord, index) => {
+      queuedRecord.queuePosition = index + 1;
+    });
+
+    this.applyQueueScheduling(true);
+    void this.persistState();
+    return this.getSnapshot();
   }
 
   getMagnetUri(id: string) {
@@ -763,7 +1082,7 @@ export class WebTorrentCore extends EventEmitter {
 
   getTorrentFolderPath(id: string) {
     const record = this.getRecord(id);
-    return record.torrent.path || record.downloadPath;
+    return this.getTorrentStorageRootPath(record);
   }
 
   getTorrentFilePath(request: OpenTorrentFileRequest) {
@@ -774,7 +1093,7 @@ export class WebTorrentCore extends EventEmitter {
       throw new Error(`Torrent file not found: ${request.fileIndex}`);
     }
 
-    const basePath = path.resolve(record.torrent.path || record.downloadPath);
+    const basePath = this.getTorrentStorageRootPath(record);
     const filePath = path.resolve(basePath, file.path || file.name);
 
     if (!isPathInside(basePath, filePath)) {
@@ -859,9 +1178,129 @@ export class WebTorrentCore extends EventEmitter {
     this.client.destroy();
   }
 
+  private async addTorrentFromSource(
+    source: PersistedTorrentSource,
+    request: InternalAddTorrentRequest,
+    options: { countAsAdded?: boolean } = {}
+  ) {
+    if (source.type === "magnet") {
+      return this.addTorrentInput(source.magnetUri, source, request, options);
+    }
+
+    if (source.type === "torrent_url") {
+      try {
+        const torrentFile = await fs.readFile(source.cachedFilePath);
+        return this.addTorrentInput(torrentFile, source, request, options);
+      } catch {
+        const torrentFile = await fetchTorrentFile(source.url);
+        const cachedFilePath = await this.cacheTorrentUrlFile(source.url, torrentFile);
+        return this.addTorrentInput(
+          torrentFile,
+          { ...source, cachedFilePath },
+          request,
+          options
+        );
+      }
+    }
+
+    const torrentFile = await fs.readFile(source.filePath);
+    return this.addTorrentInput(torrentFile, source, request, options);
+  }
+
+  private async removeTorrentFromClient(record: TorrentRecord, deleteData = false) {
+    await new Promise<void>((resolve, reject) => {
+      void this.client.remove(
+        record.torrent,
+        { destroyStore: deleteData },
+        (error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+
+          resolve();
+        }
+      );
+    });
+  }
+
+  private getTorrentStorageRootPath(record: TorrentRecord) {
+    const basePath = path.resolve(record.torrent.path || record.downloadPath);
+    const storageFolderName = this.getTorrentStorageFolderName(record);
+
+    return storageFolderName ? path.resolve(basePath, storageFolderName) : basePath;
+  }
+
+  private getTorrentStorageFolderName(record: TorrentRecord) {
+    const infoHash = record.torrent.infoHash;
+    const name = record.torrent.name || getSourceDisplayName(record.source);
+
+    if (!infoHash || !name) {
+      return null;
+    }
+
+    return `${name} - ${infoHash.slice(0, 8)}`;
+  }
+
+  private commitSelectionIfNeeded(record: TorrentRecord) {
+    if (!record.selectionPending) {
+      return;
+    }
+
+    record.selectionPending = false;
+    this.applyFilePriorities(record);
+  }
+
+  private hasExportableTorrentFile(record: TorrentRecord) {
+    return Boolean(
+      record.torrent.torrentFile ||
+        record.torrent.metadata ||
+        record.source.type === "torrent_file" ||
+        record.source.type === "torrent_url"
+    );
+  }
+
+  private async getExportableTorrentFile(record: TorrentRecord): Promise<{
+    source: ExportTorrentFileResult["source"];
+    torrentFile: Buffer;
+  }> {
+    if (record.torrent.torrentFile) {
+      return {
+        source: "metadata",
+        torrentFile: Buffer.from(record.torrent.torrentFile)
+      };
+    }
+
+    if (record.torrent.metadata) {
+      return {
+        source: "metadata",
+        torrentFile: Buffer.from(record.torrent.metadata)
+      };
+    }
+
+    if (record.source.type === "torrent_file") {
+      return {
+        source: "source_file",
+        torrentFile: await fs.readFile(record.source.filePath)
+      };
+    }
+
+    if (record.source.type === "torrent_url") {
+      return {
+        source: "cached_url",
+        torrentFile: await fs.readFile(record.source.cachedFilePath)
+      };
+    }
+
+    throw createCodedError(
+      "torrent_export_unavailable",
+      "Torrent metadata is not available yet."
+    );
+  }
+
   private async restoreTorrentUrl(
     source: Extract<PersistedTorrentSource, { type: "torrent_url" }>,
-    request: AddTorrentFileRequest | AddMagnetRequest | AddTorrentUrlRequest
+    request: InternalAddTorrentRequest
   ) {
     try {
       const torrentFile = await fs.readFile(source.cachedFilePath);
@@ -889,18 +1328,34 @@ export class WebTorrentCore extends EventEmitter {
     return cachedFilePath;
   }
 
+  private allocateQueuePosition(value: unknown) {
+    const numeric = Number(value);
+
+    if (Number.isInteger(numeric) && numeric > 0) {
+      this.queuePositionCounter = Math.max(this.queuePositionCounter, numeric);
+      return numeric;
+    }
+
+    this.queuePositionCounter += 1;
+    return this.queuePositionCounter;
+  }
+
   private async addTorrentInput(
     input: string | Buffer,
     source: PersistedTorrentSource,
-    request: AddTorrentFileRequest | AddMagnetRequest
+    request: InternalAddTorrentRequest,
+    options: { countAsAdded?: boolean } = {}
   ) {
     const downloadPath = request.downloadPath || this.options.defaultDownloadPath;
     const filePriorities = normalizeFilePriorities(request.filePriorities);
+    const selectionPending = Boolean(request.selectFilesBeforeStart ?? request.selectionPending);
     const { profile, webTorrentOptions } = buildWebTorrentAddOptions({
       downloadPath,
       profileId: request.profileId,
-      startPaused: request.startPaused,
-      forcePrivate: this.networkSettings.privateMode
+      startPaused: selectionPending ? false : request.startPaused,
+      deselect: selectionPending,
+      forcePrivate: this.networkSettings.privateMode,
+      uploadSlots: this.networkSettings.connectionLimits.uploadSlots
     });
 
     return new Promise<TorrentSummary>((resolve, reject) => {
@@ -915,6 +1370,15 @@ export class WebTorrentCore extends EventEmitter {
         downloadPath,
         profileId: profile.id,
         manualPaused: Boolean(request.startPaused),
+        queuePaused: false,
+        forceStarted: Boolean(request.forceStarted),
+        selectionPending,
+        nameOverride: normalizeTorrentName(request.nameOverride ?? null),
+        queuePosition: this.allocateQueuePosition(request.queuePosition),
+        completedAt: normalizePersistedDate(request.completedAt),
+        seedUploadSlotLimit: normalizeSeedUploadSlotLimit(
+          request.seedUploadSlotLimit
+        ),
         category: normalizeTorrentCategory(request.category),
         tags: normalizeTorrentTags(request.tags),
         filePriorities,
@@ -927,12 +1391,15 @@ export class WebTorrentCore extends EventEmitter {
         trackerErrorCount: 0,
         lastTrackerError: null,
         noPeersSources: [],
-        statusOverride: request.startPaused ? "paused" : undefined
+        statusOverride: request.startPaused || selectionPending ? "paused" : undefined
       };
 
       this.records.set(temporaryId, record);
       this.attachTorrentEvents(record);
-      this.applyFilePriorities(record);
+      this.applyUploadSlotLimit(record);
+      if (!record.selectionPending) {
+        this.applyFilePriorities(record);
+      }
 
       const rejectBeforeAdded = (error: Error) => {
         if (resolved) {
@@ -951,6 +1418,7 @@ export class WebTorrentCore extends EventEmitter {
         resolved = true;
         torrent.removeListener("error", rejectBeforeAdded);
         this.promoteRecordId(record);
+        this.applyQueueScheduling(false);
         const summary = this.toSummary(record);
         this.emitCore("torrent.added", summary);
         this.emitCore("assistant.profile.applied", {
@@ -965,7 +1433,9 @@ export class WebTorrentCore extends EventEmitter {
           torrentId: summary.id,
           source: "add_dialog"
         });
-        this.recordTorrentAdded();
+        if (options.countAsAdded !== false) {
+          this.recordTorrentAdded();
+        }
         this.emitAssistantHealth(summary);
         this.emitAssistantScheduleSuggestion(summary.id);
         void this.persistState();
@@ -989,26 +1459,36 @@ export class WebTorrentCore extends EventEmitter {
       record.metadataReceivedAt = new Date().toISOString();
       record.lastActivityAt = record.metadataReceivedAt;
       this.promoteRecordId(record);
-      this.applyFilePriorities(record);
+      if (!record.selectionPending) {
+        this.applyFilePriorities(record);
+      }
       const summary = this.toSummary(record);
       this.emitCore("torrent.metadata.received", summary);
       this.emitAssistantHealth(summary);
       this.emitAssistantScheduleSuggestion(summary.id);
+      this.applyQueueScheduling(true);
       this.emitStatus(record);
       void this.persistState();
     });
 
     torrent.on("ready", () => {
       this.promoteRecordId(record);
-      this.applyFilePriorities(record);
+      if (!record.selectionPending) {
+        this.applyFilePriorities(record);
+      }
       record.lastActivityAt = new Date().toISOString();
+      this.applyQueueScheduling(true);
       this.emitStatus(record);
     });
 
     torrent.on("done", () => {
-      record.statusOverride = "completed";
-      record.lastActivityAt = new Date().toISOString();
+      const now = new Date().toISOString();
+      record.completedAt = record.completedAt ?? now;
+      record.statusOverride = undefined;
+      record.lastActivityAt = now;
       this.recordTorrentCompleted();
+      this.applyQueueScheduling(true);
+      void this.applySeedingRules();
       this.emitCore("torrent.completed", this.toSummary(record));
       this.emitStatus(record);
       void this.persistState();
@@ -1066,15 +1546,19 @@ export class WebTorrentCore extends EventEmitter {
     const metadataReady = Boolean(torrent.metadata || torrent.ready);
     const timeRemaining = Number(torrent.timeRemaining);
     const connectedSeeds = countConnectedSeeds(torrent);
+    const queueRole = getQueueRole(record);
+    const queueState = this.getQueueState(record);
 
     return {
       id: record.id,
       infoHash: torrent.infoHash ?? null,
-      name: torrent.name || getSourceDisplayName(record.source),
+      name: record.nameOverride || torrent.name || getSourceDisplayName(record.source),
+      originalName: torrent.name ?? null,
       status: this.getStatus(record),
       progress: clamp(torrent.progress ?? 0),
       sizeBytes: toNonNegativeNumber(torrent.length),
       downloadedBytes: toNonNegativeNumber(torrent.downloaded),
+      uploadedBytes: toNonNegativeNumber((torrent as WebTorrentTorrent & { uploaded?: number }).uploaded),
       downloadSpeedBytes: toNonNegativeNumber(torrent.downloadSpeed),
       uploadSpeedBytes: toNonNegativeNumber(torrent.uploadSpeed),
       seeds: connectedSeeds,
@@ -1082,12 +1566,17 @@ export class WebTorrentCore extends EventEmitter {
       etaSeconds: Number.isFinite(timeRemaining)
         ? Math.max(0, Math.ceil(timeRemaining / 1_000))
         : null,
-      savePath: torrent.path || record.downloadPath,
+      savePath: this.getTorrentStorageRootPath(record),
       metadataReady,
       private: Boolean(torrent.private),
       sourceType: record.source.type as TorrentSourceType,
       selectedProfileId: record.profileId,
       recheckAvailable: typeof torrent.rescanFiles === "function",
+      forceStarted: record.forceStarted,
+      selectionPending: record.selectionPending,
+      canMoveData: true,
+      canReannounce: Boolean(torrent.discovery?.tracker && torrent.announce?.length),
+      canExportTorrent: this.hasExportableTorrentFile(record),
       category: record.category,
       tags: [...record.tags],
       files: torrent.files.map((file, index) =>
@@ -1103,17 +1592,33 @@ export class WebTorrentCore extends EventEmitter {
       lastActivityAt: record.lastActivityAt,
       lastError: record.recentErrors[record.recentErrors.length - 1] ?? null,
       trackerHosts: getTrackerHosts(torrent),
-      connectedSeeds
+      trackers: getTrackers(torrent),
+      httpSources: getHttpSources(torrent),
+      peerDetails: getPeerDetails(torrent),
+      connectedSeeds,
+      queueRole,
+      queueState,
+      queuePosition: this.getQueuePosition(record, queueRole),
+      queuedReason: getQueuedReason(record),
+      completedAt: record.completedAt
     };
   }
 
   private getStatus(record: TorrentRecord): TorrentStatus {
-    if (record.statusOverride) {
+    if (record.statusOverride && record.statusOverride !== "completed") {
       return record.statusOverride;
     }
 
-    if (record.manualPaused || record.torrent.paused) {
+    if (record.selectionPending) {
       return "paused";
+    }
+
+    if (record.manualPaused) {
+      return "paused";
+    }
+
+    if (record.queuePaused) {
+      return "queued";
     }
 
     if (!record.torrent.metadata && !record.torrent.ready) {
@@ -1136,6 +1641,198 @@ export class WebTorrentCore extends EventEmitter {
       status: summary.status,
       torrent: summary
     });
+  }
+
+  private applyQueueScheduling(emitChanges: boolean) {
+    const before = new Map(
+      [...this.records.values()].map((record) => [
+        record.id,
+        `${record.queuePaused}:${record.torrent.paused}:${this.getStatus(record)}`
+      ])
+    );
+    const queueSettings = this.automationSettings.queue;
+    const activeIds = new Set<string>();
+
+    if (queueSettings.enabled) {
+      for (const role of ["download", "seed"] as const) {
+        const candidates = this.getQueueCandidates(role);
+        const forced = candidates.filter((record) => record.forceStarted);
+        const regular = candidates.filter((record) => !record.forceStarted);
+        const limit =
+          role === "download"
+            ? queueSettings.maxActiveDownloads
+            : queueSettings.maxActiveSeeds;
+        const regularSlots =
+          limit === null ? regular.length : Math.max(0, limit - forced.length);
+
+        for (const record of [...forced, ...regular.slice(0, regularSlots)]) {
+          activeIds.add(record.id);
+        }
+      }
+    } else {
+      for (const record of this.records.values()) {
+        if (this.isQueueCandidate(record)) {
+          activeIds.add(record.id);
+        }
+      }
+    }
+
+    for (const record of this.records.values()) {
+      if (!this.isQueueCandidate(record)) {
+        record.queuePaused = false;
+        if (record.manualPaused || record.selectionPending) {
+          record.torrent.pause();
+        }
+        continue;
+      }
+
+      const active = activeIds.has(record.id);
+      record.queuePaused = !active;
+
+      if (active) {
+        record.torrent.resume();
+        this.applyUploadSlotLimit(record);
+      } else {
+        record.torrent.pause();
+      }
+    }
+
+    const changedRecords = [...this.records.values()].filter((record) => {
+      const previous = before.get(record.id);
+      const current = `${record.queuePaused}:${record.torrent.paused}:${this.getStatus(record)}`;
+      return previous !== current;
+    });
+
+    if (changedRecords.length > 0 && emitChanges) {
+      for (const record of changedRecords) {
+        this.emitStatus(record);
+      }
+      this.emitCore("torrent.queue.updated", {
+        snapshot: this.getSnapshot()
+      });
+    }
+
+    return changedRecords.length > 0;
+  }
+
+  private async applySeedingRules() {
+    if (this.seedingRulesApplying) {
+      return;
+    }
+
+    this.seedingRulesApplying = true;
+
+    try {
+      const rules = this.automationSettings.seedingRules.filter(
+        (rule) => rule.enabled
+      );
+
+      if (rules.length === 0) {
+        return;
+      }
+
+      for (const record of [...this.records.values()]) {
+        if (!isCompletedRecord(record)) {
+          continue;
+        }
+
+        if (!record.completedAt) {
+          record.completedAt = new Date().toISOString();
+        }
+
+        const rule = rules.find((item) => seedingRuleMatches(item, record));
+
+        if (!rule) {
+          continue;
+        }
+
+        if (rule.action === "remove") {
+          await this.remove({ id: record.id, deleteData: false });
+          continue;
+        }
+
+        if (rule.action === "limit") {
+          const nextLimit = rule.uploadSlotLimit ?? 1;
+          if (record.seedUploadSlotLimit !== nextLimit) {
+            record.seedUploadSlotLimit = nextLimit;
+            this.applyUploadSlotLimit(record);
+            this.emitCore("torrent.details.updated", this.toSummary(record));
+            void this.persistState();
+          }
+          continue;
+        }
+
+        if (!record.manualPaused) {
+          record.manualPaused = true;
+          record.queuePaused = false;
+          record.forceStarted = false;
+          record.statusOverride = "paused";
+          record.torrent.pause();
+          this.emitStatus(record);
+          this.applyQueueScheduling(true);
+          void this.persistState();
+        }
+      }
+    } finally {
+      this.seedingRulesApplying = false;
+    }
+  }
+
+  private getQueueCandidates(role: TorrentQueueRole) {
+    return [...this.records.values()]
+      .filter((record) => getQueueRole(record) === role && this.isQueueCandidate(record))
+      .sort(compareQueueRecords);
+  }
+
+  private getQueueRecords(role: TorrentQueueRole) {
+    return [...this.records.values()]
+      .filter((record) => getQueueRole(record) === role)
+      .sort(compareQueueRecords);
+  }
+
+  private isQueueCandidate(record: TorrentRecord) {
+    if (
+      record.manualPaused ||
+      record.selectionPending ||
+      record.statusOverride === "checking" ||
+      record.statusOverride === "error"
+    ) {
+      return false;
+    }
+
+    return Boolean(record.torrent.metadata || record.torrent.ready || record.torrent.infoHash);
+  }
+
+  private getQueueState(record: TorrentRecord): TorrentQueueState {
+    if (record.manualPaused || record.selectionPending) {
+      return "paused";
+    }
+
+    if (
+      record.statusOverride === "checking" ||
+      record.statusOverride === "error" ||
+      !this.isQueueCandidate(record)
+    ) {
+      return "unmanaged";
+    }
+
+    return record.queuePaused ? "queued" : "active";
+  }
+
+  private getQueuePosition(record: TorrentRecord, role: TorrentQueueRole) {
+    const records = this.getQueueRecords(role);
+    return Math.max(0, records.findIndex((item) => item.id === record.id)) + 1;
+  }
+
+  private applyUploadSlotLimit(record: TorrentRecord) {
+    const uploadSlots =
+      record.seedUploadSlotLimit ??
+      this.networkSettings.connectionLimits.uploadSlots ??
+      null;
+
+    if (uploadSlots !== null && typeof record.torrent._rechokeNumSlots === "number") {
+      record.torrent._rechokeNumSlots = uploadSlots;
+    }
   }
 
   private applyFilePriorities(record: TorrentRecord) {
@@ -1492,6 +2189,7 @@ export class WebTorrentCore extends EventEmitter {
         privateMode: this.networkSettings.privateMode,
         encryptionMode: this.networkSettings.encryptionMode,
         speedLimits: { ...this.getEffectiveSpeedLimits() },
+        connectionLimits: { ...this.networkSettings.connectionLimits },
         networkInterface: { ...this.networkSettings.networkInterface },
         proxy: { ...this.networkSettings.proxy }
       };
@@ -1513,6 +2211,10 @@ export class WebTorrentCore extends EventEmitter {
     this.client.throttleUpload(
       toWebTorrentLimit(speedLimits.uploadBytesPerSecond)
     );
+    this.client.maxConns = this.networkSettings.connectionLimits.maxConnections ?? 55;
+    for (const record of this.records.values()) {
+      this.applyUploadSlotLimit(record);
+    }
 
     this.activeNetworkSettings = {
       ...this.activeNetworkSettings,
@@ -1520,6 +2222,7 @@ export class WebTorrentCore extends EventEmitter {
       privateMode: this.networkSettings.privateMode,
       encryptionMode: this.networkSettings.encryptionMode,
       speedLimits: { ...speedLimits },
+      connectionLimits: { ...this.networkSettings.connectionLimits },
       networkInterface: { ...this.networkSettings.networkInterface },
       proxy: { ...this.networkSettings.proxy }
     };
@@ -1761,15 +2464,21 @@ export class WebTorrentCore extends EventEmitter {
 
   private async persistState() {
     const state: PersistedTorrentState = {
-      version: 4,
+      version: 6,
       torrents: [...this.records.values()].map((record) => ({
         source: record.source,
         downloadPath: record.downloadPath,
         profileId: record.profileId,
-        paused: record.manualPaused || record.torrent.paused === true,
+        paused: record.manualPaused,
         category: record.category,
         tags: [...record.tags],
         filePriorities: { ...record.filePriorities },
+        nameOverride: record.nameOverride,
+        forceStarted: record.forceStarted,
+        selectionPending: record.selectionPending,
+        queuePosition: record.queuePosition,
+        completedAt: record.completedAt,
+        seedUploadSlotLimit: record.seedUploadSlotLimit,
         addedAt: record.addedAt,
         metadataReceivedAt: record.metadataReceivedAt
       }))
@@ -2001,6 +2710,11 @@ function isPathInside(basePath: string, candidatePath: string) {
   return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
+function isPathInsideOrSame(basePath: string, candidatePath: string) {
+  const relative = path.relative(basePath, candidatePath);
+  return !relative || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 function normalizeFilePriorities(
   filePriorities: Record<string, TorrentFilePriority> | undefined
 ) {
@@ -2011,6 +2725,113 @@ function normalizeFilePriorities(
   }
 
   return normalized;
+}
+
+function normalizeTorrentName(name: string | null | undefined) {
+  const normalized = String(name ?? "").trim().replace(/\s+/g, " ");
+
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized.slice(0, 160);
+}
+
+function normalizeDestinationPath(destinationPath: string | null | undefined) {
+  const normalized = String(destinationPath ?? "").trim();
+
+  if (!normalized) {
+    throw createCodedError(
+      "destination_required",
+      "A destination folder is required."
+    );
+  }
+
+  return path.resolve(normalized);
+}
+
+function normalizeTorrentExportPath(
+  targetPath: string | null | undefined,
+  torrentName: string
+) {
+  if (targetPath?.trim()) {
+    return path.resolve(targetPath.trim());
+  }
+
+  return path.resolve(`${sanitizeFileName(torrentName || "torrent")}.torrent`);
+}
+
+async function moveTorrentFiles(
+  previousRootPath: string,
+  destinationRootPath: string,
+  files: Array<{ path: string }>
+) {
+  let movedFiles = 0;
+  const previousRoot = path.resolve(previousRootPath);
+  const nextRoot = path.resolve(destinationRootPath);
+
+  if (previousRoot === nextRoot) {
+    return movedFiles;
+  }
+
+  for (const file of files) {
+    const relativePath = file.path || "";
+    const fromPath = path.resolve(previousRoot, relativePath);
+    const toPath = path.resolve(nextRoot, relativePath);
+
+    if (!isPathInsideOrSame(previousRoot, fromPath) || !isPathInsideOrSame(nextRoot, toPath)) {
+      continue;
+    }
+
+    try {
+      await fs.stat(fromPath);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        continue;
+      }
+
+      throw error;
+    }
+
+    await fs.mkdir(path.dirname(toPath), { recursive: true });
+    await moveFile(fromPath, toPath);
+    movedFiles += 1;
+  }
+
+  await pruneEmptyDirectories(previousRoot);
+  return movedFiles;
+}
+
+async function moveFile(fromPath: string, toPath: string) {
+  try {
+    await fs.rename(fromPath, toPath);
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "EXDEV") {
+      throw error;
+    }
+
+    await fs.copyFile(fromPath, toPath);
+    await fs.rm(fromPath, { force: true });
+  }
+}
+
+async function pruneEmptyDirectories(rootPath: string) {
+  try {
+    const entries = await fs.readdir(rootPath, { withFileTypes: true });
+
+    await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => pruneEmptyDirectories(path.join(rootPath, entry.name)))
+    );
+
+    const remainingEntries = await fs.readdir(rootPath);
+    if (remainingEntries.length === 0) {
+      await fs.rmdir(rootPath);
+    }
+  } catch {
+    // Best effort cleanup only.
+  }
 }
 
 function applyFilePriority(
@@ -2025,7 +2846,7 @@ function applyFilePriority(
   file.select(priority === "high" ? 10 : undefined);
 }
 
-function applyProfileHintsToRecord(record: TorrentRecord) {
+function applyProfileHintsToRecord(record: TorrentRecord, applySelection = true) {
   if (record.profileId !== "stream_while_downloading") {
     return;
   }
@@ -2039,7 +2860,114 @@ function applyProfileHintsToRecord(record: TorrentRecord) {
   }
 
   record.filePriorities[mediaFile.path] = "high";
-  applyFilePriority(mediaFile, "high");
+  if (applySelection) {
+    applyFilePriority(mediaFile, "high");
+  }
+}
+
+function compareQueueRecords(left: TorrentRecord, right: TorrentRecord) {
+  if (left.queuePosition !== right.queuePosition) {
+    return left.queuePosition - right.queuePosition;
+  }
+
+  return Date.parse(left.addedAt) - Date.parse(right.addedAt);
+}
+
+function getQueueRole(record: TorrentRecord): TorrentQueueRole {
+  return isCompletedRecord(record) ? "seed" : "download";
+}
+
+function getQueuedReason(record: TorrentRecord) {
+  if (record.selectionPending) {
+    return "selection_pending" as const;
+  }
+
+  if (record.manualPaused) {
+    return "manual" as const;
+  }
+
+  if (!record.queuePaused) {
+    return null;
+  }
+
+  return getQueueRole(record) === "download"
+    ? ("download_limit" as const)
+    : ("seed_limit" as const);
+}
+
+function isCompletedRecord(record: TorrentRecord) {
+  return Boolean(
+    record.completedAt ||
+      record.torrent.done ||
+      toNonNegativeNumber(record.torrent.progress) >= 1
+  );
+}
+
+function seedingRuleMatches(
+  rule: SeedingRuleSettings,
+  record: TorrentRecord,
+  now = Date.now()
+) {
+  const downloadedBytes = toNonNegativeNumber(record.torrent.downloaded);
+  const uploadedBytes = toNonNegativeNumber(
+    (record.torrent as WebTorrentTorrent & { uploaded?: number }).uploaded
+  );
+  const ratio =
+    downloadedBytes > 0 && uploadedBytes > 0 ? uploadedBytes / downloadedBytes : 0;
+  const ratioReached =
+    rule.ratioLimit !== null && downloadedBytes > 0 && ratio >= rule.ratioLimit;
+  const completedAt = record.completedAt ? Date.parse(record.completedAt) : NaN;
+  const minutesAfterComplete =
+    Number.isFinite(completedAt) && completedAt > 0
+      ? Math.floor((now - completedAt) / 60_000)
+      : 0;
+  const timeReached =
+    rule.minutesAfterComplete !== null &&
+    minutesAfterComplete >= rule.minutesAfterComplete;
+
+  return ratioReached || timeReached;
+}
+
+function normalizePersistedDate(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  return Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+function normalizeSeedUploadSlotLimit(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const numeric = Number(value);
+
+  if (!Number.isInteger(numeric) || numeric <= 0) {
+    return null;
+  }
+
+  return Math.min(numeric, 100);
+}
+
+function getMovedQueueIndex(
+  currentIndex: number,
+  remainingLength: number,
+  direction: UpdateTorrentQueuePositionRequest["direction"]
+) {
+  if (direction === "top") {
+    return 0;
+  }
+
+  if (direction === "bottom") {
+    return remainingLength;
+  }
+
+  if (direction === "up") {
+    return Math.max(0, currentIndex - 1);
+  }
+
+  return Math.min(remainingLength, currentIndex + 1);
 }
 
 function countConnectedSeeds(torrent: WebTorrentTorrent) {
@@ -2056,6 +2984,105 @@ function getTrackerHosts(torrent: WebTorrentTorrent) {
   ).slice(0, 12);
 }
 
+function getTrackers(torrent: WebTorrentTorrent) {
+  return (torrent.announce ?? []).map((url, index) => ({
+    url,
+    host: getUrlHost(url) ?? url,
+    protocol: getUrlProtocol(url),
+    tier: index
+  }));
+}
+
+function getHttpSources(torrent: WebTorrentTorrent) {
+  return (torrent.urlList ?? []).map((url) => ({
+    url,
+    host: getUrlHost(url) ?? url,
+    protocol: getUrlProtocol(url)
+  }));
+}
+
+function getPeerDetails(torrent: WebTorrentTorrent) {
+  return (torrent.wires ?? [])
+    .filter((wire) => !wire.destroyed)
+    .map((wire, index) => {
+      const peerId = normalizePeerId(wire.peerId);
+      return {
+        id: `${wire.remoteAddress ?? "peer"}:${wire.remotePort ?? index}:${peerId ?? index}`,
+        address: wire.remoteAddress ?? null,
+        port: typeof wire.remotePort === "number" ? wire.remotePort : null,
+        clientName: decodePeerClient(peerId),
+        peerId,
+        type: wire.type ?? "peer",
+        downloadSpeedBytes: toNonNegativeNumber(wire.downloadSpeed?.()),
+        uploadSpeedBytes: toNonNegativeNumber(wire.uploadSpeed?.()),
+        progress: getPeerProgress(wire),
+        flags: getPeerFlags(wire)
+      };
+    })
+    .slice(0, 200);
+}
+
+function normalizePeerId(peerId: string | Uint8Array | Buffer | undefined) {
+  if (!peerId) {
+    return null;
+  }
+
+  if (typeof peerId === "string") {
+    return peerId;
+  }
+
+  return Buffer.from(peerId).toString("latin1");
+}
+
+function decodePeerClient(peerId: string | null) {
+  if (!peerId) {
+    return "Unknown";
+  }
+
+  const azStyle = peerId.match(/^-([A-Za-z0-9]{2})([0-9A-Za-z]{4})-/);
+  if (azStyle) {
+    const client = PEER_CLIENT_PREFIXES[azStyle[1]] ?? azStyle[1];
+    const version = azStyle[2].split("").join(".");
+    return `${client} ${version}`;
+  }
+
+  return "Unknown";
+}
+
+function getPeerProgress(
+  wire: NonNullable<WebTorrentTorrent["wires"]>[number]
+) {
+  const pieces = wire.peerPieces?.buffer;
+
+  if (!pieces || pieces.length === 0 || !wire.peerPieces?.get) {
+    return wire.isSeeder ? 1 : null;
+  }
+
+  let availablePieces = 0;
+  const totalPieces = pieces.length * 8;
+
+  for (let index = 0; index < totalPieces; index += 1) {
+    if (wire.peerPieces.get(index)) {
+      availablePieces += 1;
+    }
+  }
+
+  return totalPieces > 0 ? clamp(availablePieces / totalPieces) : null;
+}
+
+function getPeerFlags(wire: NonNullable<WebTorrentTorrent["wires"]>[number]) {
+  const flags: string[] = [];
+
+  if (wire.isSeeder) flags.push("seed");
+  if (wire.peerChoking) flags.push("peer-choking");
+  if (wire.peerInterested) flags.push("peer-interested");
+  if (wire.amChoking) flags.push("am-choking");
+  if (wire.amInterested) flags.push("am-interested");
+  if (wire.type) flags.push(wire.type);
+
+  return flags;
+}
+
 function getUrlHost(value: string) {
   try {
     return new URL(value).host;
@@ -2063,6 +3090,26 @@ function getUrlHost(value: string) {
     return null;
   }
 }
+
+function getUrlProtocol(value: string) {
+  try {
+    return new URL(value).protocol.replace(/:$/, "");
+  } catch {
+    return "unknown";
+  }
+}
+
+const PEER_CLIENT_PREFIXES: Record<string, string> = {
+  AZ: "Azureus",
+  BT: "BitTorrent",
+  DE: "Deluge",
+  LT: "libtorrent",
+  qB: "qBittorrent",
+  TR: "Transmission",
+  UT: "uTorrent",
+  WD: "WebTorrent Desktop",
+  WW: "WebTorrent"
+};
 
 function isMediaFile(value: string) {
   return [

@@ -22,6 +22,10 @@ export const DEFAULT_NETWORK_SETTINGS: NetworkSettings = {
     downloadBytesPerSecond: null,
     uploadBytesPerSecond: null
   },
+  connectionLimits: {
+    maxConnections: 55,
+    uploadSlots: 10
+  },
   networkInterface: {
     name: null,
     bindOnly: false,
@@ -40,6 +44,8 @@ export const DEFAULT_NETWORK_SETTINGS: NetworkSettings = {
 
 export const NETWORK_CAPABILITIES: NetworkCapabilities = {
   globalSpeedLimits: true,
+  connectionLimits: true,
+  uploadSlots: true,
   dhtPexLsdAtStartup: true,
   incomingPortAtStartup: true,
   upnpNatPmpAtStartup: true,
@@ -87,6 +93,15 @@ export function normalizeNetworkSettings(
       uploadBytesPerSecond: normalizeLimit(
         input?.speedLimits?.uploadBytesPerSecond ??
           fallback.speedLimits.uploadBytesPerSecond
+      )
+    },
+    connectionLimits: {
+      maxConnections: normalizeConnectionLimit(
+        input?.connectionLimits?.maxConnections ??
+          fallback.connectionLimits.maxConnections
+      ),
+      uploadSlots: normalizeUploadSlots(
+        input?.connectionLimits?.uploadSlots ?? fallback.connectionLimits.uploadSlots
       )
     },
     networkInterface: {
@@ -140,7 +155,7 @@ export function buildWebTorrentClientOptions(
     utPex: settings.pex,
     natPmp: settings.natPmp,
     natUpnp: settings.upnp,
-    maxConns: 55,
+    maxConns: settings.connectionLimits.maxConnections ?? 55,
     torrentPort: settings.incomingPort ?? 0,
     downloadLimit: toWebTorrentLimit(settings.speedLimits.downloadBytesPerSecond),
     uploadLimit: toWebTorrentLimit(settings.speedLimits.uploadBytesPerSecond)
@@ -178,6 +193,10 @@ export function applyNetworkProfile(
       speedLimits: {
         downloadBytesPerSecond: null,
         uploadBytesPerSecond: null
+      },
+      connectionLimits: {
+        maxConnections: 55,
+        uploadSlots: 10
       },
       proxy: {
         ...base.proxy,
@@ -230,6 +249,10 @@ export function applyNetworkProfile(
       speedLimits: {
         downloadBytesPerSecond: 512 * 1024,
         uploadBytesPerSecond: 128 * 1024
+      },
+      connectionLimits: {
+        maxConnections: 24,
+        uploadSlots: 4
       }
     });
   }
@@ -303,6 +326,34 @@ function normalizeLimit(value: unknown) {
   }
 
   return Math.min(Math.round(numeric), MAX_LIMIT_BYTES_PER_SECOND);
+}
+
+function normalizeConnectionLimit(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const numeric = Number(value);
+
+  if (!Number.isInteger(numeric) || numeric <= 0) {
+    return null;
+  }
+
+  return Math.min(numeric, 10_000);
+}
+
+function normalizeUploadSlots(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const numeric = Number(value);
+
+  if (!Number.isInteger(numeric) || numeric <= 0) {
+    return null;
+  }
+
+  return Math.min(numeric, 100);
 }
 
 function normalizeOptionalString(value: unknown) {

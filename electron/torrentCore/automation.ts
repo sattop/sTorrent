@@ -3,6 +3,7 @@ import {
   type AutomationCapabilities,
   type AutomationSettings,
   type FavoriteFolderSettings,
+  type QueueSettings,
   type RssAutoLoadRuleSettings,
   type SeedingRuleSettings,
   type SpeedLimitScheduleSettings,
@@ -14,6 +15,14 @@ const MAX_AUTOMATION_ITEMS = 50;
 const MAX_SEEN_RSS_ITEMS = 500;
 const MAX_LIMIT_BYTES_PER_SECOND = 10 * 1024 * 1024 * 1024;
 const MINUTE_MAX = 24 * 60 - 1;
+const MAX_ACTIVE_QUEUE_ITEMS = 1_000;
+const MAX_UPLOAD_SLOTS = 100;
+
+export const DEFAULT_QUEUE_SETTINGS: QueueSettings = {
+  enabled: true,
+  maxActiveDownloads: 3,
+  maxActiveSeeds: 5
+};
 
 export const DEFAULT_AUTOMATION_SETTINGS: AutomationSettings = {
   watchFolders: [],
@@ -21,6 +30,7 @@ export const DEFAULT_AUTOMATION_SETTINGS: AutomationSettings = {
   seedingRules: [],
   rssRules: [],
   speedSchedules: [],
+  queue: DEFAULT_QUEUE_SETTINGS,
   hooksEnabled: false
 };
 
@@ -28,6 +38,7 @@ export const AUTOMATION_CAPABILITIES: AutomationCapabilities = {
   watchFolders: true,
   favoriteFolders: true,
   seedingRules: true,
+  queue: true,
   rssDuplicatePrevention: true,
   speedLimitSchedules: true,
   hooks: false,
@@ -67,7 +78,23 @@ export function normalizeAutomationSettings(
       fallback.speedSchedules,
       normalizeSpeedSchedule
     ),
+    queue: normalizeQueueSettings(input?.queue, fallback.queue),
     hooksEnabled: false
+  };
+}
+
+export function normalizeQueueSettings(
+  input: Partial<QueueSettings> | undefined,
+  fallback: QueueSettings = DEFAULT_QUEUE_SETTINGS
+): QueueSettings {
+  return {
+    enabled: toBoolean(input?.enabled, fallback.enabled),
+    maxActiveDownloads: normalizeQueueLimit(
+      input?.maxActiveDownloads ?? fallback.maxActiveDownloads
+    ),
+    maxActiveSeeds: normalizeQueueLimit(
+      input?.maxActiveSeeds ?? fallback.maxActiveSeeds
+    )
   };
 }
 
@@ -178,7 +205,8 @@ function normalizeSeedingRule(
     enabled: toBoolean(rule.enabled, true),
     ratioLimit,
     minutesAfterComplete,
-    action: "pause",
+    action: normalizeSeedingRuleAction(rule.action),
+    uploadSlotLimit: normalizeUploadSlotLimit(rule.uploadSlotLimit),
     requireConfirmationBeforeDataRemoval: true
   };
 }
@@ -339,6 +367,42 @@ function normalizePositiveInteger(value: unknown) {
   }
 
   return Math.min(numeric, 1_000_000);
+}
+
+function normalizeQueueLimit(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const numeric = Number(value);
+
+  if (!Number.isInteger(numeric) || numeric <= 0) {
+    return null;
+  }
+
+  return Math.min(numeric, MAX_ACTIVE_QUEUE_ITEMS);
+}
+
+function normalizeUploadSlotLimit(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const numeric = Number(value);
+
+  if (!Number.isInteger(numeric) || numeric <= 0) {
+    return null;
+  }
+
+  return Math.min(numeric, MAX_UPLOAD_SLOTS);
+}
+
+function normalizeSeedingRuleAction(value: unknown): SeedingRuleSettings["action"] {
+  if (value === "remove" || value === "limit") {
+    return value;
+  }
+
+  return "pause";
 }
 
 function normalizeRatio(value: unknown) {

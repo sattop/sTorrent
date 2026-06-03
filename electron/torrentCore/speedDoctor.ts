@@ -407,6 +407,8 @@ export function createTorrentSpeedDoctorReport(
         natPmp: settings.natPmp,
         downloadLimitBytesPerSecond: settings.speedLimits.downloadBytesPerSecond,
         uploadLimitBytesPerSecond: settings.speedLimits.uploadBytesPerSecond,
+        maxConnections: settings.connectionLimits.maxConnections,
+        uploadSlots: settings.connectionLimits.uploadSlots,
         proxyType: network.settings.proxy.type,
         interfaceSelected: Boolean(network.settings.networkInterface.name),
         activeSpeedScheduleId: automation.activeSpeedScheduleId

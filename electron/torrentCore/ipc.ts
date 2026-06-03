@@ -10,16 +10,22 @@ import {
   type AssistantProfileApplyRequest,
   type AssistantWarningDismissRequest,
   type AutomationSettings,
+  type CommitPreparedTorrentAddRequest,
+  type ExportTorrentFileRequest,
+  type MoveTorrentDataRequest,
   type NetworkSettings,
+  type RenameTorrentRequest,
   type RunSpeedDoctorRequest,
   type SetTorrentFilePriorityRequest,
+  type SetTorrentFilePrioritiesRequest,
   type SpeedDoctorScanMode,
   type TorrentCoreEvent,
   type TorrentCoreResult,
   type OpenTorrentFileRequest,
   type RemoveTorrentRequest,
   type UpdateTorrentProfileRequest,
-  type UpdateTorrentLabelsRequest
+  type UpdateTorrentLabelsRequest,
+  type UpdateTorrentQueuePositionRequest
 } from "./contracts.js";
 import type { WebTorrentCore } from "./webtorrentCore.js";
 
@@ -77,6 +83,10 @@ export function registerTorrentCoreIpc(core: WebTorrentCore) {
     toResult(() => core.resume(id))
   );
 
+  ipcMain.handle(TORRENT_IPC_CHANNELS.forceStart, async (_event, id: string) =>
+    toResult(() => core.forceStart(id))
+  );
+
   ipcMain.handle(
     TORRENT_IPC_CHANNELS.remove,
     async (_event, request: string | RemoveTorrentRequest) =>
@@ -85,6 +95,64 @@ export function registerTorrentCoreIpc(core: WebTorrentCore) {
 
   ipcMain.handle(TORRENT_IPC_CHANNELS.recheck, async (_event, id: string) =>
     toResult(() => core.recheck(id))
+  );
+
+  ipcMain.handle(
+    TORRENT_IPC_CHANNELS.rename,
+    async (_event, request: RenameTorrentRequest) =>
+      toResult(() => core.rename(request))
+  );
+
+  ipcMain.handle(
+    TORRENT_IPC_CHANNELS.moveData,
+    async (_event, request: MoveTorrentDataRequest) =>
+      toResult(async () => {
+        let destinationPath = request.destinationPath;
+
+        if (!destinationPath) {
+          const selection = await dialog.showOpenDialog({
+            properties: ["openDirectory", "createDirectory"]
+          });
+
+          if (selection.canceled || selection.filePaths.length === 0) {
+            throw createCodedError("cancelled", "Data move cancelled.");
+          }
+
+          destinationPath = selection.filePaths[0];
+        }
+
+        return core.moveData({ ...request, destinationPath });
+      })
+  );
+
+  ipcMain.handle(TORRENT_IPC_CHANNELS.reannounce, async (_event, id: string) =>
+    toResult(() => core.reannounce(id))
+  );
+
+  ipcMain.handle(
+    TORRENT_IPC_CHANNELS.exportTorrentFile,
+    async (_event, request: ExportTorrentFileRequest) =>
+      toResult(async () => {
+        let targetPath = request.targetPath;
+
+        if (!targetPath) {
+          const torrent =
+            core.getSnapshot().torrents.find((item) => item.id === request.id) ??
+            null;
+          const selection = await dialog.showSaveDialog({
+            defaultPath: `${sanitizeDialogFileName(torrent?.name ?? "torrent")}.torrent`,
+            filters: [{ name: ".torrent", extensions: ["torrent"] }]
+          });
+
+          if (selection.canceled || !selection.filePath) {
+            throw createCodedError("cancelled", "Torrent export cancelled.");
+          }
+
+          targetPath = selection.filePath;
+        }
+
+        return core.exportTorrentFile({ ...request, targetPath });
+      })
   );
 
   ipcMain.handle(TORRENT_IPC_CHANNELS.copyMagnet, async (_event, id: string) =>
@@ -137,6 +205,24 @@ export function registerTorrentCoreIpc(core: WebTorrentCore) {
     TORRENT_IPC_CHANNELS.setFilePriority,
     async (_event, request: SetTorrentFilePriorityRequest) =>
       toResult(() => core.setFilePriority(request))
+  );
+
+  ipcMain.handle(
+    TORRENT_IPC_CHANNELS.setFilePriorities,
+    async (_event, request: SetTorrentFilePrioritiesRequest) =>
+      toResult(() => core.setFilePriorities(request))
+  );
+
+  ipcMain.handle(
+    TORRENT_IPC_CHANNELS.commitPreparedAdd,
+    async (_event, request: CommitPreparedTorrentAddRequest) =>
+      toResult(() => core.commitPreparedAdd(request))
+  );
+
+  ipcMain.handle(
+    TORRENT_IPC_CHANNELS.updateQueuePosition,
+    async (_event, request: UpdateTorrentQueuePositionRequest) =>
+      toResult(() => core.updateQueuePosition(request))
   );
 
   ipcMain.handle(TORRENT_IPC_CHANNELS.getSnapshot, async () =>
@@ -249,6 +335,10 @@ function createCodedError(code: string, message: string) {
   const error = new Error(message);
   (error as Error & { code: string }).code = code;
   return error;
+}
+
+function sanitizeDialogFileName(value: string) {
+  return value.replace(/[^a-z0-9_-]+/gi, "-").slice(0, 64) || "torrent";
 }
 
 function normalizeRunSpeedDoctorRequest(

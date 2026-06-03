@@ -42,15 +42,23 @@ import {
   type AssistantWarningDismissRequest,
   type AutomationSettings,
   type AutomationSettingsState,
+  type CommitPreparedTorrentAddRequest,
+  type ExportTorrentFileRequest,
+  type ExportTorrentFileResult,
+  type MoveTorrentDataRequest,
+  type MoveTorrentDataResult,
   type NetworkDiagnosticsReport,
   type NetworkSettings,
   type NetworkSettingsState,
   type OpenTorrentFileRequest,
+  type ReannounceTorrentResult,
   type RemoteAccessSettings,
   type RemoteAccessSettingsState,
   type RemoveTorrentRequest,
+  type RenameTorrentRequest,
   type RunSpeedDoctorRequest,
   type SetTorrentFilePriorityRequest,
+  type SetTorrentFilePrioritiesRequest,
   type SpeedDoctorPortCheckResult,
   type SpeedDoctorHistorySummary,
   type SpeedDoctorReportExport,
@@ -64,6 +72,7 @@ import {
   type TorrentSummary,
   type UpdateTorrentLabelsRequest,
   type UpdateTorrentProfileRequest,
+  type UpdateTorrentQueuePositionRequest,
   type WatchFolderScanResult
 } from "./torrentCore/contracts.js";
 
@@ -91,6 +100,10 @@ contextBridge.exposeInMainWorld("storent", {
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.resume, id) as Promise<
         TorrentCoreResult<TorrentSummary>
       >,
+    forceStart: (id: string) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.forceStart, id) as Promise<
+        TorrentCoreResult<TorrentSummary>
+      >,
     remove: (request: string | RemoveTorrentRequest) =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.remove, request) as Promise<
         TorrentCoreResult<TorrentCoreSnapshot>
@@ -98,6 +111,22 @@ contextBridge.exposeInMainWorld("storent", {
     recheck: (id: string) =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.recheck, id) as Promise<
         TorrentCoreResult<TorrentSummary>
+      >,
+    rename: (request: RenameTorrentRequest) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.rename, request) as Promise<
+        TorrentCoreResult<TorrentSummary>
+      >,
+    moveData: (request: MoveTorrentDataRequest) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.moveData, request) as Promise<
+        TorrentCoreResult<MoveTorrentDataResult>
+      >,
+    reannounce: (id: string) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.reannounce, id) as Promise<
+        TorrentCoreResult<ReannounceTorrentResult>
+      >,
+    exportTorrentFile: (request: ExportTorrentFileRequest) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.exportTorrentFile, request) as Promise<
+        TorrentCoreResult<ExportTorrentFileResult>
       >,
     copyMagnet: (id: string) =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.copyMagnet, id) as Promise<
@@ -122,6 +151,18 @@ contextBridge.exposeInMainWorld("storent", {
     setFilePriority: (request: SetTorrentFilePriorityRequest) =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.setFilePriority, request) as Promise<
         TorrentCoreResult<TorrentSummary>
+      >,
+    setFilePriorities: (request: SetTorrentFilePrioritiesRequest) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.setFilePriorities, request) as Promise<
+        TorrentCoreResult<TorrentSummary>
+      >,
+    commitPreparedAdd: (request: CommitPreparedTorrentAddRequest) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.commitPreparedAdd, request) as Promise<
+        TorrentCoreResult<TorrentSummary>
+      >,
+    updateQueuePosition: (request: UpdateTorrentQueuePositionRequest) =>
+      ipcRenderer.invoke(TORRENT_IPC_CHANNELS.updateQueuePosition, request) as Promise<
+        TorrentCoreResult<TorrentCoreSnapshot>
       >,
     getSnapshot: () =>
       ipcRenderer.invoke(TORRENT_IPC_CHANNELS.getSnapshot) as Promise<

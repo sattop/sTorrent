@@ -55,12 +55,25 @@ or:
 
 ```http
 GET /api/snapshot
+GET /api/statistics
+GET /api/event-logs
+POST /api/event-logs/export
 POST /api/torrents/magnet
+POST /api/torrents/url
+GET /api/torrents/{id}/magnet
 POST /api/torrents/{id}/pause
 POST /api/torrents/{id}/resume
+POST /api/torrents/{id}/force-start
 POST /api/torrents/{id}/recheck
+POST /api/torrents/{id}/reannounce
+POST /api/torrents/{id}/queue
+GET /api/torrents/{id}/speed-doctor
+POST /api/torrents/{id}/speed-doctor/export
 DELETE /api/torrents/{id}
+PATCH /api/torrents/{id}/name
 PATCH /api/torrents/{id}/labels
+PATCH /api/torrents/{id}/profile
+PATCH /api/torrents/{id}/files
 PATCH /api/torrents/{id}/files/{fileIndex}
 GET /api/network-settings
 PUT /api/network-settings
@@ -110,7 +123,10 @@ Use `null` to remove a limit.
 The WebUI serves the same responsive React application used by the desktop shell.
 In browser mode it stores the entered remote password in `sessionStorage` and
 sends it as a Bearer token to the local API. Browser mode supports magnet
-downloads, status polling, pause/resume, labels, file priorities, network
-settings, automation settings, and watch-folder scans. Selecting local `.torrent`
-files remains a desktop-only action because the browser cannot pass a trusted
-filesystem path to the Electron core.
+and `.torrent` URL downloads, status polling, pause/resume/force-start,
+re-announce, queue ordering, rename, labels, profile changes, prepared file
+selection, file priorities, network settings, automation settings, event logs,
+speed reports, and watch-folder scans. Selecting local `.torrent` files, moving downloaded data,
+exporting `.torrent` files, deleting downloaded data, and opening files/folders
+remain desktop-only actions because the browser cannot pass trusted filesystem
+paths to the Electron core.

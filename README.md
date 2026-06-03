@@ -10,25 +10,27 @@ The project is currently an MVP. Core torrent operations work, Windows builds ar
 
 ## Download
 
-Latest release: [sTorent v0.1.4](https://github.com/sattop/sTorrent/releases/tag/v0.1.4)
+Latest release: [sTorent v0.2.0](https://github.com/sattop/sTorrent/releases/tag/v0.2.0)
 
 Download the Windows installer:
 
-[sTorent-Setup.exe](https://github.com/sattop/sTorrent/releases/download/v0.1.4/sTorent-Setup.exe)
+[sTorent-Setup.exe](https://github.com/sattop/sTorrent/releases/download/v0.2.0/sTorent-Setup.exe)
 
 The release also includes `latest.yml`, the installer blockmap, and `SHA256SUMS.txt` for update metadata and checksum verification.
 
 ## Features
 
 - Add `.torrent` files and magnet links.
-- Pause, resume, remove, and recheck torrents.
-- View download progress, speed, peers, ETA, files, and trackers.
-- Assign categories and tags.
+- Choose files before starting a newly added torrent.
+- Pause, resume, force start, remove, recheck, re-announce, rename, move data, and export `.torrent` files when metadata is available.
+- Manage a real active queue with separate download/seed limits, force-start bypass, saved queue order, and queue controls in desktop and WebUI.
+- View download progress, speed, peers, ETA, files, trackers, HTTP sources, and detailed peer wire data when WebTorrent exposes it.
+- Assign categories and tags with reusable suggestions.
 - Configure file priorities.
 - Use download profiles for common scenarios.
 - Configure DHT, PEX, LSD, private mode, ports, limits, proxy, and interface binding.
 - Run network diagnostics through Speed Doctor.
-- Configure automation foundations: watch folders, favorite folders, seeding rules, RSS rules, and speed schedules.
+- Configure automation foundations: watch folders, favorite folders, queue limits, seeding rules, RSS rules, and speed schedules.
 - Enable an optional local WebUI and remote JSON API with password protection.
 - Check, download, and install app updates from GitHub Releases.
 - Switch UI language between Russian, English, Spanish, and Chinese.

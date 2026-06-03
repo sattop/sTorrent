@@ -27,18 +27,38 @@ declare module "webtorrent" {
     done?: boolean;
     paused?: boolean;
     private?: boolean;
+    torrentFile?: Uint8Array | Buffer | null;
     metadata?: Uint8Array | Buffer | null;
     announce?: string[];
+    urlList?: string[];
+    discovery?: {
+      tracker?: {
+        start?(opts?: Record<string, unknown>): void;
+        update?(opts?: Record<string, unknown>): void;
+      } | null;
+      _dhtAnnounce?(): void;
+    } | null;
     wires?: Array<{
       isSeeder?: boolean;
+      peerId?: string | Uint8Array | Buffer;
+      type?: string;
       remoteAddress?: string;
       remotePort?: number;
       destroyed?: boolean;
+      peerChoking?: boolean;
+      peerInterested?: boolean;
+      amChoking?: boolean;
+      amInterested?: boolean;
+      peerPieces?: {
+        get?(index: number): boolean;
+        buffer?: Uint8Array | Buffer;
+      };
       downloadSpeed?: () => number;
       uploadSpeed?: () => number;
     }>;
     _queue?: unknown[];
     _peers?: Map<string, unknown>;
+    _rechokeNumSlots?: number;
     files: WebTorrentFile[];
     pause(): void;
     resume(): void;
@@ -64,6 +84,7 @@ declare module "webtorrent" {
   export default class WebTorrent extends EventEmitter {
     constructor(opts?: WebTorrentClientOptions);
     torrents: WebTorrentTorrent[];
+    maxConns: number;
     downloadSpeed: number;
     uploadSpeed: number;
     add(

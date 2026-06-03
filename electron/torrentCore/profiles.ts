@@ -79,14 +79,17 @@ export interface BuildTorrentOptionsInput {
   downloadPath: string;
   profileId?: DownloadProfileId;
   startPaused?: boolean;
+  deselect?: boolean;
   forcePrivate?: boolean;
+  uploadSlots?: number | null;
 }
 
 export function buildWebTorrentAddOptions(input: BuildTorrentOptionsInput) {
   const profile = resolveDownloadProfile(input.profileId);
   const torrentOptions = {
     ...profile.torrentOptions,
-    private: input.forcePrivate || profile.torrentOptions.private
+    private: input.forcePrivate || profile.torrentOptions.private,
+    uploads: input.uploadSlots ?? profile.torrentOptions.uploads
   };
 
   return {
@@ -96,7 +99,8 @@ export function buildWebTorrentAddOptions(input: BuildTorrentOptionsInput) {
       addUID: true,
       destroyStoreOnDestroy: false,
       path: input.downloadPath,
-      paused: Boolean(input.startPaused)
+      paused: Boolean(input.startPaused),
+      deselect: Boolean(input.deselect)
     }
   };
 }
