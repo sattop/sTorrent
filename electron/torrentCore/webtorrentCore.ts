@@ -1680,8 +1680,20 @@ export class WebTorrentCore extends EventEmitter {
     for (const record of this.records.values()) {
       if (!this.isQueueCandidate(record)) {
         record.queuePaused = false;
-        if (record.manualPaused || record.selectionPending) {
+        const metadataReady = Boolean(record.torrent.metadata || record.torrent.ready);
+
+        if (
+          shouldPauseUnmanagedTorrent(
+            record.manualPaused,
+            record.selectionPending,
+            metadataReady
+          )
+        ) {
           record.torrent.pause();
+        } else if (record.selectionPending && record.torrent.paused) {
+          // Prepared magnets must stay connected long enough to fetch metadata.
+          // Their deselected files still prevent payload data from downloading.
+          record.torrent.resume();
         }
         continue;
       }
@@ -3218,6 +3230,14 @@ export function normalizeTorrentUrl(value: string) {
 
   url.hash = "";
   return url.toString();
+}
+
+export function shouldPauseUnmanagedTorrent(
+  manualPaused: boolean,
+  selectionPending: boolean,
+  metadataReady: boolean
+) {
+  return manualPaused || (selectionPending && metadataReady);
 }
 
 async function fetchTorrentFile(url: string) {

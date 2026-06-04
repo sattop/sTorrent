@@ -16,6 +16,10 @@ All notable changes to sTorent are documented in this file.
 - Resume now returns torrents to the scheduler instead of always bypassing queue limits.
 - Automation settings now include queue limits and safer seeding rule normalization.
 
+### Fixed
+
+- Kept prepared magnet torrents network-active while waiting for metadata, preventing new magnet downloads from remaining at 0 B/s.
+
 ## [0.1.4] - 2026-06-01
 
 ### Added

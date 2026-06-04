@@ -63,6 +63,7 @@ import {
 } from "../electron/torrentCore/labels";
 import {
   normalizeTorrentUrl,
+  shouldPauseUnmanagedTorrent,
   toTorrentFileInfo
 } from "../electron/torrentCore/webtorrentCore";
 import {
@@ -493,6 +494,12 @@ describe("torrent-core contracts", () => {
       paused: false,
       deselect: true
     });
+  });
+
+  it("keeps prepared magnets internally active until metadata arrives", () => {
+    expect(shouldPauseUnmanagedTorrent(false, true, false)).toBe(false);
+    expect(shouldPauseUnmanagedTorrent(false, true, true)).toBe(true);
+    expect(shouldPauseUnmanagedTorrent(true, true, false)).toBe(true);
   });
 
   it("normalizes categories, tags, and file priorities at the core boundary", () => {
